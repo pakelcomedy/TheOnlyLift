@@ -1,9 +1,7 @@
 // script.js
-// The Only Lift — User-fixed version
-// - NO auto-enter / NO auto-exit (manual only)
-// - Auto-close ALWAYS after CFG.doorAutoCloseMs when doors open
-// - Robust storage wrapper (avoids SecurityError in restricted contexts)
-// - ActionPanel attached to ROOT with high z-index so Masuk/Keluar buttons are clickable
+// The Only Lift — fixed: NO auto-enter/exit, robust auto-close, safe storage fallback,
+// block movement while doors are open, improved mobile behavior
+// Usage: <script type="module" src="script.js" defer></script>
 
 const LiftSim = (function () {
   'use strict';
@@ -15,55 +13,53 @@ const LiftSim = (function () {
   const nowMs = () => Date.now();
   const secToMs = s => s * 1000;
   const rand = (a, b) => a + Math.random() * (b - a);
-  const dispatch = (name, detail = {}) => window.dispatchEvent(new CustomEvent(name, { detail }));
-
-  /* -------------------------
-     Safe storage wrapper
-     - Avoid direct localStorage/sessionStorage calls that throw SecurityError
-  ------------------------- */
-  const safeStorage = (function () {
-    let ok = false;
+  // storage: graceful fallback if localStorage/sessionStorage are inaccessible
+  let __memoryStore = {};
+  const storageAvailable = (() => {
     try {
-      // feature-detect in try/catch
-      ok = !!window && typeof window.localStorage !== 'undefined';
-      // do one test access (wrapped) to detect blocked contexts
-      if (ok) {
-        try {
-          const testKey = '__ls_test__';
-          window.localStorage.setItem(testKey, '1');
-          window.localStorage.removeItem(testKey);
-          ok = true;
-        } catch (e) {
-          ok = false;
-        }
+      const testKey = '__lift_storage_test__';
+      window.localStorage.setItem(testKey, '1');
+      window.localStorage.removeItem(testKey);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  })();
+
+  const saveJSON = (k, v) => {
+    try {
+      if (storageAvailable) {
+        localStorage.setItem(k, JSON.stringify(v));
+      } else {
+        __memoryStore[k] = JSON.stringify(v);
       }
     } catch (e) {
-      ok = false;
+      // don't spam console; keep a warning
+      console.warn('saveJSON failed', e);
+      try { __memoryStore[k] = JSON.stringify(v); } catch (_) {}
     }
-    return {
-      isAvailable: () => ok,
-      set(key, value) {
-        if (!ok) return;
-        try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.warn('safeStorage.set failed', e); }
-      },
-      get(key) {
-        if (!ok) return null;
-        try {
-          const s = window.localStorage.getItem(key);
-          return s ? JSON.parse(s) : null;
-        } catch (e) { console.warn('safeStorage.get failed', e); return null; }
-      },
-      remove(key) {
-        if (!ok) return;
-        try { window.localStorage.removeItem(key); } catch (e) { console.warn('safeStorage.remove failed', e); }
+  };
+  const loadJSON = (k) => {
+    try {
+      if (storageAvailable) {
+        const s = localStorage.getItem(k);
+        return s ? JSON.parse(s) : null;
+      } else {
+        const s = __memoryStore[k];
+        return s ? JSON.parse(s) : null;
       }
-    };
-  })();
+    } catch (e) {
+      console.warn('loadJSON failed', e);
+      return null;
+    }
+  };
+
+  const dispatch = (name, detail = {}) => window.dispatchEvent(new CustomEvent(name, { detail }));
 
   /* -------------------------
      DOM & Config
   ------------------------- */
-  const ROOT = document.getElementById('app') || document.querySelector('.app') || document.body;
+  const ROOT = document.getElementById('app') || document.body;
 
   const DEFAULT_CFG = {
     floors: 18,
@@ -90,7 +86,6 @@ const LiftSim = (function () {
       if (parsed.doorAutoCloseMs !== undefined) CFG.doorAutoCloseMs = parsed.doorAutoCloseMs;
     } catch (e) { console.warn('Invalid app-config JSON, using defaults.', e); }
   }
-
   if (ROOT) {
     if (ROOT.dataset.floors) CFG.floors = parseInt(ROOT.dataset.floors, 10);
     if (ROOT.dataset.initialFloor) CFG.initialFloor = parseInt(ROOT.dataset.initialFloor, 10);
@@ -133,16 +128,14 @@ const LiftSim = (function () {
     actionPanel: document.getElementById('actionPanel')
   };
 
-  // ensure actionPanel exists & accessible; attach to ROOT to avoid overlay/hit-test issues
+  // ensure actionPanel exists & accessible (keeps it clickable on mobile)
   if (DOM.actionPanel) {
-    try {
-      DOM.actionPanel.setAttribute('role', DOM.actionPanel.getAttribute('role') || 'region');
-      DOM.actionPanel.setAttribute('aria-label', DOM.actionPanel.getAttribute('aria-label') || 'Tindakan cepat (Masuk/Keluar)');
-      DOM.actionPanel.setAttribute('aria-live', DOM.actionPanel.getAttribute('aria-live') || 'polite');
-      // ensure panel is able to receive pointer events
-      DOM.actionPanel.style.pointerEvents = DOM.actionPanel.style.pointerEvents || 'auto';
-      DOM.actionPanel.style.zIndex = DOM.actionPanel.style.zIndex || '99999';
-    } catch (e) { console.warn('actionPanel attribute set failed', e); }
+    DOM.actionPanel.setAttribute('role', DOM.actionPanel.getAttribute('role') || 'region');
+    DOM.actionPanel.setAttribute('aria-label', DOM.actionPanel.getAttribute('aria-label') || 'Tindakan cepat (Masuk/Keluar)');
+    DOM.actionPanel.setAttribute('aria-live', DOM.actionPanel.getAttribute('aria-live') || 'polite');
+    // ensure pointer events & z-index in case CSS elsewhere drops it
+    DOM.actionPanel.style.pointerEvents = DOM.actionPanel.style.pointerEvents || 'auto';
+    DOM.actionPanel.style.zIndex = DOM.actionPanel.style.zIndex || '9999';
   } else {
     const ap = document.createElement('div');
     ap.id = 'actionPanel';
@@ -150,48 +143,32 @@ const LiftSim = (function () {
     ap.setAttribute('role', 'region');
     ap.setAttribute('aria-label', 'Tindakan cepat (Masuk/Keluar)');
     ap.setAttribute('aria-live', 'polite');
-
-    // Place it in ROOT with fixed positioning so it's always clickable and visible
-    ap.style.position = 'absolute';
-    ap.style.right = '18px';
-    ap.style.bottom = '18px';
+    ap.style.position = ap.style.position || 'relative';
+    ap.style.zIndex = ap.style.zIndex || '9999';
+    ap.style.pointerEvents = ap.style.pointerEvents || 'auto';
     ap.style.display = 'flex';
-    ap.style.flexWrap = 'wrap';
     ap.style.gap = '8px';
+    ap.style.flexWrap = 'wrap';
     ap.style.alignItems = 'center';
     ap.style.justifyContent = 'center';
-    ap.style.pointerEvents = 'auto';
-    ap.style.zIndex = '99999';
-    // subtle background so it's visible but not obtrusive
-    ap.style.background = 'rgba(0,0,0,0.0)';
-    ap.style.padding = '4px';
-
-    // append to ROOT (app container) not inside nested panels that might block clicks
-    try {
-      (ROOT || document.body).appendChild(ap);
-      DOM.actionPanel = ap;
-    } catch (e) {
-      // fallback: append to body
-      try { document.body.appendChild(ap); DOM.actionPanel = ap; } catch (e2) { console.warn('failed to append actionPanel', e2); }
-    }
+    ap.style.marginTop = '8px';
+    const pp = document.getElementById('passengerPanel') || ROOT;
+    (pp || ROOT).appendChild(ap);
+    DOM.actionPanel = ap;
   }
 
-  // ensure other fallback nodes exist
   if (!DOM.passengerLog) {
-    const el = document.createElement('div'); el.id = 'passengerLog'; el.className = 'passenger-log';
-    if (ROOT) ROOT.appendChild(el); DOM.passengerLog = el;
+    const el = document.createElement('div'); el.id = 'passengerLog'; el.className = 'passenger-log'; if (ROOT) ROOT.appendChild(el); DOM.passengerLog = el;
   }
   if (!DOM.floorPanel) {
-    const el = document.createElement('nav'); el.id = 'floorButtons'; el.className = 'floor-buttons';
-    if (ROOT) ROOT.appendChild(el); DOM.floorPanel = el;
+    const el = document.createElement('nav'); el.id = 'floorButtons'; el.className = 'floor-buttons'; if (ROOT) ROOT.appendChild(el); DOM.floorPanel = el;
   }
   if (!DOM.externalCallPanel) {
-    const el = document.createElement('div'); el.id = 'externalCallPanel'; el.className = 'external-call-panel';
-    if (ROOT) ROOT.appendChild(el); DOM.externalCallPanel = el;
+    const el = document.createElement('div'); el.id = 'externalCallPanel'; el.className = 'external-call-panel'; if (ROOT) ROOT.appendChild(el); DOM.externalCallPanel = el;
   }
 
   /* -------------------------
-     AudioEngine
+     AudioEngine (unchanged)
   ------------------------- */
   const AudioEngine = (function () {
     let ctx = null, master = null, enabled = true, tts = true;
@@ -280,14 +257,7 @@ const LiftSim = (function () {
     } else {
       node = document.createElement('div');
       node.className = 'log-line';
-      const timeNode = document.createElement('span');
-      timeNode.className = 'log-time';
-      timeNode.textContent = (new Date()).toLocaleTimeString();
-      const textNode = document.createElement('div');
-      textNode.className = 'log-text';
-      textNode.textContent = msg;
-      node.appendChild(timeNode);
-      node.appendChild(textNode);
+      node.textContent = `[${(new Date()).toLocaleTimeString()}] ${msg}`;
     }
     container.prepend(node);
     while (container.children.length > 400) container.removeChild(container.lastChild);
@@ -296,7 +266,7 @@ const LiftSim = (function () {
   }
 
   /* -------------------------
-     Elevator Model
+     Elevator Model (manual enter/exit only, unconditional auto-close)
   ------------------------- */
   const EState = { IDLE:'IDLE', MOVING:'MOVING', ARRIVED:'ARRIVED', DOOR_OPEN:'DOOR_OPEN', DOOR_CLOSED:'DOOR_CLOSED', EMERGENCY:'EMERGENCY' };
 
@@ -320,6 +290,7 @@ const LiftSim = (function () {
       this.overloadLimitKg = 1800;
       this.arrivalFloor = null;
       this.components = { door: 100, motor: 100 };
+      // ensure elevator uses configured auto-close
       this.autoCloseMs = CFG.doorAutoCloseMs || 10000;
       this.arrivalTs = 0;
       this._autoCloseTimer = null;
@@ -350,43 +321,41 @@ const LiftSim = (function () {
       dispatch('lift:call', { floor: ff, who });
     }
 
-    // Open doors and schedule unconditional auto-close after autoCloseMs
+    // open doors and schedule unconditional auto-close after autoCloseMs
     openDoors() {
       if (this.components.door < 5) return false;
       this.doorsOpen = true;
       this.state = EState.DOOR_OPEN;
       this.arrivalTs = nowMs();
+      // sound + dispatch
       AudioEngine.doorSwoosh(true);
       dispatch('lift:door', { state: 'open' });
 
-      // clear previous timer
+      // clear any existing timer then schedule unconditional auto-close
       if (this._autoCloseTimer) {
         clearTimeout(this._autoCloseTimer);
         this._autoCloseTimer = null;
       }
-
       const ms = Number(this.autoCloseMs) || 10000;
       try {
         this._autoCloseTimer = setTimeout(() => {
           try {
             if (this.doorsOpen) {
+              // attempt to close doors (will clear timer inside closeDoors)
               this.closeDoors();
-              appendLogUI(`Pintu otomatis ditutup setelah ${Math.round(ms / 1000)}s.`);
+              appendLogUI(`Pintu otomatis ditutup setelah ${Math.round(ms/1000)}s.`);
             }
-          } catch (e) { /* ignore */ }
+          } catch (e) {}
         }, ms);
       } catch (e) { console.warn('Auto-close scheduling failed', e); }
 
       return true;
     }
 
-    // Close doors and clear auto-close timer
+    // close doors and clear auto-close timer
     closeDoors() {
       if (this.components.door < 5) return false;
-      if (this._autoCloseTimer) {
-        clearTimeout(this._autoCloseTimer);
-        this._autoCloseTimer = null;
-      }
+      if (this._autoCloseTimer) { clearTimeout(this._autoCloseTimer); this._autoCloseTimer = null; }
       this.doorsOpen = false;
       this.state = EState.DOOR_CLOSED;
       AudioEngine.doorSwoosh(false);
@@ -395,7 +364,7 @@ const LiftSim = (function () {
     }
 
     enterPlayer(weight) {
-      if (!this.doorsOpen || this.doorProgress < 0.9) return false;
+      if (!this.doorsOpen) return false;         // require doors open (no doorProgress gating)
       if (this.playerInside) return false;
       if (nowMs() - this.lastDoorActionMs < this.doorCooldownMs) return false;
       if (this.loadKg + weight > this.overloadLimitKg) return false;
@@ -406,7 +375,7 @@ const LiftSim = (function () {
     }
 
     exitPlayer(weight) {
-      if (!this.doorsOpen || this.doorProgress < 0.9) return false;
+      if (!this.doorsOpen) return false;
       if (!this.playerInside) return false;
       if (nowMs() - this.lastDoorActionMs < this.doorCooldownMs) return false;
       this.loadKg = Math.max(0, this.loadKg - weight);
@@ -442,19 +411,28 @@ const LiftSim = (function () {
     }
 
     step(dt) {
+      // doors progression (still animate doorProgress for visuals)
       const ds = (1 / this.doorSpeed) * (0.5 + (this.components.door / 100) * 0.8);
       if (this.doorsOpen) this.doorProgress = clamp(this.doorProgress + ds * dt, 0, 1);
       else this.doorProgress = clamp(this.doorProgress - ds * dt, 0, 1);
 
       if (this.state === EState.EMERGENCY) return;
 
-      if (this.doorsOpen && this.doorProgress > 0.05) {
-        this.velocity = 0; this.acceleration = 0; this.state = EState.DOOR_OPEN;
+      // IMPORTANT FIX:
+      // Block movement whenever doors are flagged as open.
+      // Previously this used a small doorProgress threshold which allowed race conditions
+      // on slow/mobile devices. Now doorsOpen === true always prevents movement.
+      if (this.doorsOpen) {
+        this.velocity = 0;
+        this.acceleration = 0;
+        this.state = EState.DOOR_OPEN;
         return;
       }
 
+      // movement logic unchanged (but now guaranteed to not run while doorsOpen)
       if (this.targetFloor === null && this.queue.length) this.popNextTarget();
       if (this.targetFloor === null) {
+        // idle damping
         this.acceleration = -this.velocity * 1.8;
         this.velocity += this.acceleration * dt;
         this.position += this.velocity * dt;
@@ -466,6 +444,8 @@ const LiftSim = (function () {
       const dist = targetPos - this.position;
       const dir = Math.sign(dist || 1);
       const absDist = Math.abs(dist);
+
+      // braking distance
       const brakingDist = (this.velocity * this.velocity) / (2 * CFG.physics.brakeLimit + 1e-6);
 
       if (absDist <= brakingDist + 0.03) {
@@ -476,17 +456,21 @@ const LiftSim = (function () {
         this.acceleration = clamp(err * 1.8, -CFG.physics.brakeLimit, CFG.physics.accelLimit);
       }
 
+      // integrate
       this.velocity += this.acceleration * dt;
       this.velocity = clamp(this.velocity, -CFG.maxSpeedMps, CFG.maxSpeedMps);
       this.position += this.velocity * dt;
       this.state = EState.MOVING;
 
+      // arrival detection
       if (absDist < 0.03 && Math.abs(this.velocity) < 0.06) {
+        // snap
         this.position = targetPos;
         this.velocity = 0; this.acceleration = 0;
         this.arrivalFloor = this.targetFloor;
         this.targetFloor = null;
         this.state = EState.ARRIVED;
+        // open doors and schedule auto-close
         this.openDoors();
         AudioEngine.chime();
         AudioEngine.announce(`Lantai ${this.arrivalFloor}`);
@@ -527,7 +511,7 @@ const LiftSim = (function () {
   }
 
   /* -------------------------
-     World
+     World (manual only)
   ------------------------- */
   class World {
     constructor() {
@@ -640,8 +624,6 @@ const LiftSim = (function () {
       if (nowMs() - e.lastDoorActionMs < e.doorCooldownMs) return;
 
       const liftFloor = e.metersToFloor(e.position);
-
-      // mark calls served at this floor
       this.markCallServedAtFloor(liftFloor);
 
       // NPC automatic boarding/exiting (sparse)
@@ -888,7 +870,7 @@ const LiftSim = (function () {
     ap.innerHTML = '';
     const e = world.elev;
     if (!(e.doorsOpen && e.doorProgress > 0.98)) { ap.style.display='none'; return; }
-    ap.style.display='flex'; ap.style.pointerEvents='auto'; ap.style.zIndex='99999';
+    ap.style.display='flex'; ap.style.pointerEvents='auto'; ap.style.zIndex='9999';
     const liftFloor = e.metersToFloor(e.position);
 
     // Masuk (manual)
@@ -990,14 +972,13 @@ const LiftSim = (function () {
         appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
       });
     }
+    // keyboard shortcuts: m = mute, o = open, c = close
     window.addEventListener('keydown', (e) => {
-      try {
-        if (e.key.toLowerCase() === 'm') {
-          const on = AudioEngine.toggle(); if (DOM.audioToggle) DOM.audioToggle.textContent = on ? '🔊' : '🔇';
-          appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
-        } else if (e.key.toLowerCase() === 'o') DOM.btnDoorOpen?.click();
-        else if (e.key.toLowerCase() === 'c') DOM.btnDoorClose?.click();
-      } catch (err) { /* ignore */ }
+      if (e.key.toLowerCase() === 'm') {
+        const on = AudioEngine.toggle(); if (DOM.audioToggle) DOM.audioToggle.textContent = on ? '🔊' : '🔇';
+        appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
+      } else if (e.key.toLowerCase() === 'o') DOM.btnDoorOpen?.click();
+      else if (e.key.toLowerCase() === 'c') DOM.btnDoorClose?.click();
     });
 
     window.addEventListener('lift:arrived', (e) => { if (e?.detail) appendLogUI(`Lift tiba di lantai ${e.detail.floor}`); });
@@ -1009,11 +990,8 @@ const LiftSim = (function () {
 
   /* Persistence */
   const PERSIST_KEY = CFG.persistenceKey || 'only-lift-world-v1';
-  function saveNow(world) {
-    try { safeStorage.set(PERSIST_KEY, { ts: nowMs(), world: world.serialize() }); }
-    catch (e) { console.warn('saveNow failed', e); }
-  }
-  function tryLoad() { try { return safeStorage.get(PERSIST_KEY); } catch (e) { return null; } }
+  function saveNow(world) { try { saveJSON(PERSIST_KEY, { ts: nowMs(), world: world.serialize() }); } catch (e) { console.warn('saveNow failed', e); } }
+  function tryLoad() { try { return loadJSON(PERSIST_KEY); } catch (e) { return null; } }
 
   /* Bootstrap */
   let world;
@@ -1088,7 +1066,7 @@ const LiftSim = (function () {
     saveNow: () => { saveNow(world); appendLogUI('World saved'); },
     reset: (preserveFloor = true) => {
       const f = preserveFloor ? world.playerFloor : CFG.initialFloor;
-      try { safeStorage.remove(PERSIST_KEY); } catch (e) { /* ignore */ }
+      try { if (storageAvailable) localStorage.removeItem(PERSIST_KEY); } catch (e) { __memoryStore = {}; }
       world = new World();
       world.playerFloor = f;
       buildInternalKeypad(world);
@@ -1099,8 +1077,8 @@ const LiftSim = (function () {
     }
   };
 
-  appendLogUI('Simulator siap — Auto-enter/auto-exit dimatikan; masuk/keluar manual. Auto-close = ' + (CFG.doorAutoCloseMs/1000) + 's; tombol Masuk/Keluar harusnya bisa diklik. Tekan "m" untuk mute/unmute.');
-  console.info('LiftSim initialized', { cfg: CFG });
+  appendLogUI('Simulator siap — Auto-enter/auto-exit dimatikan; masuk/keluar manual. Auto-close = ' + (CFG.doorAutoCloseMs/1000) + 's; tombol Masuk/Keluar berfungsi. Tekan "m" untuk mute/unmute.');
+  console.info('LiftSim initialized', { cfg: CFG, storageAvailable });
 
   return { world, cfg: CFG, audio: AudioEngine };
 })(); // end LiftSim
