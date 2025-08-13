@@ -1,0 +1,233 @@
+/* ===========================================================================
+   The Only Lift — style.css
+   - Modern, minimal, realistic 2D look for elevator simulator
+   - No external assets; everything purely CSS
+   - Match IDs/classes used in index.html
+   =========================================================================== */
+
+/* =========================
+   Theme variables
+   ========================= */
+:root{
+  /* Palette */
+  --bg: #0b1220;
+  --card: #071426;
+  --muted: #98a6b6;
+  --accent: #6dd3ff;
+  --accent-2: #7be38b;
+  --danger: #ff6b6b;
+  --glass: rgba(255,255,255,0.02);
+  --elev-main: #0f3a4a;
+  --elev-contrast: #0fa0c2;
+  --shadow: rgba(0,0,0,0.6);
+
+  /* Typography */
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+
+  /* Spacing */
+  --gap: 12px;
+  --radius: 10px;
+
+  /* Animation */
+  --door-duration: 420ms;
+  --ease-default: cubic-bezier(.2,.9,.3,1);
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  :root { --door-duration: 10ms; }
+  * { scroll-behavior: auto !important; animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}
+
+/* =========================
+   Base layout & page
+   ========================= */
+* { box-sizing: border-box; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
+html,body { height:100%; margin:0; background: linear-gradient(180deg,#031021 0%, #061627 100%); color:#e6f0f8; font-family:var(--font-sans); font-size:15px; line-height:1.3; }
+.app { max-width:1200px; margin:20px auto; padding:18px; display:grid; grid-template-rows:auto 1fr; gap:16px; }
+
+/* Header */
+.header { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+.brand-title { margin:0; font-weight:800; letter-spacing:1px; font-size:18px; color:var(--accent); }
+.brand-sub { margin:0; color:var(--muted); font-size:13px; }
+
+/* Main grid: left = visual, right = panel
+   For smaller screens it stacks column */
+.main-grid { display:grid; grid-template-columns: 1fr 360px; gap:16px; align-items:start; }
+@media (max-width:980px) {
+  .main-grid { grid-template-columns: 1fr; }
+}
+
+/* =========================
+   Visual area / canvas
+   ========================= */
+.visual-area { background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.06)); border-radius:var(--radius); padding:12px; box-shadow: 0 8px 30px var(--shadow); min-height:520px; position:relative; overflow:hidden; }
+
+/* Canvas styles (script will draw into this) */
+#shaftCanvas { display:block; width:100%; height:100%; border-radius:8px; background: linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.10)); }
+
+/* sr-only utility */
+.sr-only {
+  position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
+}
+
+/* Visual fallback (when canvas not used) */
+.visual-fallback { display:flex; gap:12px; align-items:center; justify-content:flex-start; padding:6px; color:var(--muted); }
+.fallback-floor { font-size:28px; font-weight:800; color:var(--accent); }
+.fallback-door { font-size:13px; color:var(--muted); }
+
+/* Overlay quick controls */
+.overlay-controls { position:absolute; top:10px; right:10px; display:flex; gap:8px; z-index:60; }
+.oc-btn { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.04); color:#eaf6ff; padding:6px 8px; border-radius:8px; cursor:pointer; font-weight:600; }
+.oc-btn:active { transform:translateY(1px); }
+
+/* =========================
+   Passenger panel (right)
+   ========================= */
+.passenger-panel { background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.04)); border-radius:var(--radius); padding:14px; box-shadow: 0 8px 24px var(--shadow); display:flex; flex-direction:column; gap:12px; min-height:520px; }
+
+/* Display */
+.display { background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.04)); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+.display-big { font-family: var(--font-mono); font-weight:900; font-size:44px; color:var(--accent); letter-spacing:2px; line-height:1; }
+.display-direction { font-size:22px; color:var(--muted); transform:translateY(-6px); }
+.display-small { color:var(--muted); font-size:13px; }
+
+/* Cabin controls */
+.cabin-controls { display:flex; flex-direction:column; gap:12px; }
+
+/* Row buttons */
+.btn-row { display:flex; gap:8px; align-items:center; }
+.control-btn {
+  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.08));
+  border:1px solid rgba(255,255,255,0.04);
+  color:#e9f7ff;
+  padding:10px 12px;
+  border-radius:8px;
+  cursor:pointer;
+  min-width:88px;
+  font-weight:700;
+  letter-spacing:0.3px;
+}
+.control-btn:active { transform:translateY(1px); }
+.control-btn.alarm { background:linear-gradient(180deg,#3e0b0b,#5a1111); color:var(--danger); box-shadow:0 6px 18px rgba(255,107,107,0.06); }
+
+/* Floor buttons: realistic grid */
+.floor-buttons { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; max-height:280px; overflow:auto; padding:6px; border-radius:8px; background:rgba(255,255,255,0.01); }
+.floor-btn {
+  background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.06));
+  border:1px solid rgba(255,255,255,0.03);
+  color:#dff7ff;
+  padding:10px;
+  border-radius:8px;
+  font-weight:800;
+  font-family:var(--font-mono);
+  cursor:pointer;
+  text-align:center;
+  user-select:none;
+  transition: transform 120ms var(--ease-default), box-shadow 120ms var(--ease-default), background 120ms var(--ease-default);
+}
+.floor-btn:hover { transform:translateY(-3px); box-shadow:0 8px 18px rgba(0,0,0,0.45); }
+.floor-btn[aria-pressed="true"], .floor-btn.active {
+  background:linear-gradient(180deg,#63d3ff,#2fb3d9);
+  color:#00181c;
+  box-shadow:0 10px 30px rgba(47,179,217,0.12);
+}
+
+/* passenger actions */
+.passenger-actions { display:flex; gap:8px; justify-content:space-between; margin-top:6px; }
+.action-btn {
+  flex:1;
+  padding:10px 8px;
+  border-radius:8px;
+  border:1px solid rgba(255,255,255,0.04);
+  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  color:#eaf9ff;
+  font-weight:700;
+  cursor:pointer;
+}
+.action-btn:active { transform:translateY(1px); }
+.action-btn + .action-btn { margin-left:6px; }
+
+/* Readouts */
+.readouts { background:rgba(255,255,255,0.01); padding:8px; border-radius:8px; display:grid; gap:6px; font-size:13px; color:var(--muted); }
+.readouts .kv { display:flex; justify-content:space-between; align-items:center; }
+.readouts .kv dt { font-weight:700; color:#cfeffb; font-size:12px; }
+.readouts .kv dd { margin:0; font-family:var(--font-mono); }
+
+/* Passenger log */
+.passenger-log { background:rgba(0,0,0,0.06); border-radius:8px; padding:8px; min-height:110px; max-height:180px; overflow:auto; font-family:var(--font-mono); font-size:13px; color:#e6f7ff; }
+.log-line { display:flex; gap:8px; align-items:flex-start; padding:6px 4px; border-bottom:1px dashed rgba(255,255,255,0.02); }
+.log-line .log-time { color:var(--muted); font-size:11px; min-width:72px; display:inline-block; }
+.log-line .log-text { flex:1; }
+
+/* Panel footer */
+.panel-footer { font-size:12px; color:var(--muted); }
+
+/* =========================
+   Modal styles
+   ========================= */
+.modal { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.5); opacity:0; pointer-events:none; transition:opacity 220ms var(--ease-default); z-index:200; }
+.modal[aria-hidden="false"] { opacity:1; pointer-events:auto; }
+.modal-content { background:linear-gradient(180deg,#071427,#071b2c); border-radius:12px; padding:18px; width:min(680px, 94%); box-shadow:0 20px 60px rgba(0,0,0,0.6); color:#eaf6ff; }
+.modal-content h2 { margin:0 0 8px 0; font-size:18px; }
+.modal-message { margin-bottom:12px; color:var(--muted); }
+.modal-actions { text-align:right; }
+.modal-btn { padding:8px 12px; border-radius:8px; background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01)); border:1px solid rgba(255,255,255,0.03); color:#eaf7ff; }
+
+/* =========================
+   Small utilities
+   ========================= */
+.kv { display:flex; justify-content:space-between; gap:10px; }
+.small { font-size:13px; color:var(--muted); }
+.center { display:flex; align-items:center; justify-content:center; }
+
+/* Focus and accessibility outlines */
+:focus { outline: 3px solid rgba(100,180,255,0.14); outline-offset:3px; border-radius:6px; }
+button:focus { outline: 3px solid rgba(130,217,255,0.12); outline-offset:2px; }
+
+/* Disabled / state styles */
+[disabled], .disabled { opacity:0.45; pointer-events:none; filter:grayscale(0.15); }
+
+/* =========================
+   Small "elevator-like" decorative helpers
+   ========================= */
+
+/* indicator lamp (small circle used near buttons if needed) */
+.indicator {
+  width:10px; height:10px; border-radius:50%; background:rgba(255,255,255,0.06); box-shadow:inset 0 -2px 3px rgba(0,0,0,0.25);
+}
+.indicator.on { background:var(--accent); box-shadow:0 6px 18px rgba(99,211,255,0.08); }
+
+/* digital font look for readouts when available */
+.display-big, .display-small, .readouts .kv dd { font-variant-numeric: tabular-nums; }
+
+/* =========================
+   Helpful classes for script.js
+   ========================= */
+/* door-open/closed classes (script may toggle on container or element) */
+.door-state-open .readout-door,
+.door-state-open #readoutDoor,
+.door-state-open .fallback-door { color:var(--accent-2); }
+.door-state-closed .readout-door,
+.door-state-closed #readoutDoor { color:var(--muted); }
+
+/* arrival pulse for display */
+.arrival-pulse { animation: arrivalPulse 700ms var(--ease-default); }
+@keyframes arrivalPulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 rgba(0,0,0,0); }
+  40% { transform: scale(1.03); box-shadow: 0 12px 30px rgba(0,0,0,0.45); }
+  100% { transform: scale(1); box-shadow: 0 0 0 rgba(0,0,0,0); }
+}
+
+/* small responsive adjustments */
+@media (max-width:640px){
+  .display-big { font-size:36px; }
+  .main-grid { gap:10px; }
+  .passenger-panel { padding:10px; }
+  .floor-buttons { grid-template-columns: repeat(3, 1fr); max-height:200px; }
+}
+
+/* =========================
+   End of style.css
+   ========================= */

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>The Only Lift — Passenger Simulator</title>
+  <meta name="description" content="The Only Lift — realistic single-elevator simulator (passenger view)." />
+  <meta name="author" content="You" />
+
+  <!-- Optional font -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+  <!-- Your stylesheet -->
+  <link rel="stylesheet" href="style.css">
+
+  <!-- main script (module) -->
+  <script type="module" src="script.js" defer></script>
+</head>
+<body>
+  <div id="app"
+       class="app"
+       data-elevator-id="main-lift"
+       data-floors="18"
+       data-initial-floor="0"
+       data-floor-order="descending"
+       data-passenger-weight-kg="75"
+       data-max-speed-mps="2.5"
+       role="application"
+       aria-label="The Only Lift - Passenger interface">
+
+    <!-- HEADER -->
+    <header class="header" role="banner" aria-label="Header">
+      <div class="container header-inner">
+        <div class="brand">
+          <h1 class="brand-title">THE ONLY LIFT</h1>
+          <p class="brand-sub">Passenger Simulator</p>
+        </div>
+
+        <div class="header-actions">
+          <button id="audioToggle" class="tiny-btn" aria-pressed="true" title="Mute / Unmute (shortcut: m)">🔊</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- MAIN -->
+    <main id="main" class="main-grid" role="main" aria-label="Area utama simulator">
+      <!-- VISUAL AREA -->
+      <section id="visualArea" class="visual-area" role="region" aria-label="Visual lift area">
+        <canvas id="shaftCanvas" width="1200" height="800" aria-label="Tampilan lift 2D"></canvas>
+
+        <div id="liveStatus" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+        <div id="visualFallback" class="visual-fallback" aria-hidden="true">
+          <div class="fallback-floor" id="fallbackFloor">--</div>
+          <div class="fallback-door" id="fallbackDoor">Pintu: —</div>
+        </div>
+      </section>
+
+      <!-- PASSENGER PANEL -->
+      <aside id="passengerPanel" class="passenger-panel" role="complementary" aria-label="Panel penumpang">
+        <!-- Displays -->
+        <div id="display" class="display" role="region" aria-label="Tampilan lantai dan status">
+          <div id="displayBigFloor" class="display-big" aria-live="polite">--</div>
+          <div id="displaySmall" class="display-small">Lift: -- — Anda: --</div>
+          <div id="displayState" class="display-state sr-only" aria-hidden="true">Idle</div>
+        </div>
+
+        <!-- EXTERNAL CALL PANEL (only up/down buttons; present when user outside) -->
+        <div id="externalCallPanel" class="external-call-panel" aria-label="Panggilan luar (tombol atas/bawah)"></div>
+
+        <!-- CABIN CONTROLS (internal keypad only shown when inside by script.js) -->
+        <div id="cabinControls" class="cabin-controls" role="region" aria-label="Kontrol dalam kabin">
+          <div class="control-row">
+            <button id="btnDoorOpen" class="control-btn" type="button" aria-label="Buka pintu">OPEN</button>
+            <button id="btnDoorClose" class="control-btn" type="button" aria-label="Tutup pintu">CLOSE</button>
+            <button id="btnAlarm" class="control-btn control-alarm" type="button" aria-label="Alarm darurat">ALARM</button>
+          </div>
+
+          <!-- internal floor keypad (script.js will fill this, and show only when playerInside) -->
+          <nav id="floorButtons" class="floor-buttons" role="navigation" aria-label="Tombol lantai (dalam kabin)"></nav>
+        </div>
+
+        <!-- READOUTS -->
+        <div id="readouts" class="readouts" role="region" aria-label="Informasi lift">
+          <dl>
+            <div class="kv">
+              <dt>Berat</dt>
+              <dd id="readoutLoad">0 kg</dd>
+            </div>
+            <div class="kv">
+              <dt>Kecepatan</dt>
+              <dd id="readoutSpeed">0.00 m/s</dd>
+            </div>
+            <div class="kv">
+              <dt>Pintu</dt>
+              <dd id="readoutDoor">Tertutup</dd>
+            </div>
+          </dl>
+        </div>
+
+        <!-- PASSENGER LOG -->
+        <div id="passengerLog" class="passenger-log" role="log" aria-live="polite" aria-relevant="additions"></div>
+
+        <footer class="panel-footer">
+          <small>Panel penumpang — hanya tombol atas/bawah jika Anda di luar; keypad lantai muncul setelah masuk.</small>
+        </footer>
+      </aside>
+    </main>
+
+    <!-- TEMPLATES -->
+    <template id="tplFloorButton">
+      <button class="floor-btn" type="button" data-floor="" aria-pressed="false">
+        <span class="floor-num"></span>
+        <span class="sr-only floor-indicator">Belum dipilih</span>
+      </button>
+    </template>
+
+    <template id="tplCallButton">
+      <div class="call-btns">
+        <button class="call-up" data-floor="" aria-label="Panggil naik">▲</button>
+        <button class="call-down" data-floor="" aria-label="Panggil turun">▼</button>
+      </div>
+    </template>
+
+    <template id="tplLogLine">
+      <div class="log-line">
+        <time class="log-time" datetime=""></time>
+        <div class="log-text"></div>
+      </div>
+    </template>
+
+    <!-- App config (script.js reads this) -->
+    <script type="application/json" id="app-config">
+    {
+      "elevatorId": "main-lift",
+      "floors": 18,
+      "initialFloor": 0,
+      "floorOrder": "descending",
+      "passengerWeightKg": 75,
+      "maxSpeedMps": 2.5,
+      "floorHeightMeters": 3.0,
+      "physics": {
+        "accelLimit": 1.5,
+        "brakeLimit": 2.0
+      },
+      "persistenceKey": "only-lift-world-v1"
+    }
+    </script>
+
+    <!-- MODAL -->
+    <div id="modal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="modalTitle">
+      <div class="modal-content">
+        <h2 id="modalTitle">Perhatian</h2>
+        <div id="modalMessage" class="modal-message" role="document"></div>
+        <div class="modal-actions">
+          <button id="modalClose" class="modal-btn">Tutup</button>
+        </div>
+      </div>
+    </div>
+
+    <noscript>
+      <div class="noscript-warning" role="alert">
+        Javascript harus diaktifkan agar simulator ini berfungsi.
+      </div>
+    </noscript>
+  </div>
+
+  <!-- tiny inline helper to avoid blank UI before CSS loads -->
+  <style>
+    :root { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; color-scheme: light; }
+    .sr-only { position: absolute !important; left: -10000px !important; top:auto !important; width:1px !important; height:1px !important; overflow:hidden; }
+    .tiny-btn { background:transparent; border:0; font-size:1rem; cursor:pointer; }
+  </style>
+</body>
+</html>
