@@ -1,233 +1,384 @@
-/* ===========================================================================
-   The Only Lift — style.css
-   - Modern, minimal, realistic 2D look for elevator simulator
-   - No external assets; everything purely CSS
-   - Match IDs/classes used in index.html
-   =========================================================================== */
+/* ============================================================================
+   The Only Lift — COMPLETE REDESIGN style.css
+   - Very detailed, realistic elevator UI skin
+   - Matches IDs/classes used in your index.html (see comments)
+   - Long, commented, tunable via CSS variables at top
+   - Respect prefers-reduced-motion
+   ============================================================================ */
 
-/* =========================
-   Theme variables
-   ========================= */
+/* ========================================================================
+   THEME VARIABLES (tweak these to change whole look quickly)
+   ======================================================================== */
 :root{
-  /* Palette */
-  --bg: #0b1220;
-  --card: #071426;
+  /* primary palette */
+  --bg-0: #031021;            /* page background */
+  --bg-1: #071427;            /* card / shaft background */
+  --panel-0: #0f3a4a;         /* cabin main */
+  --panel-1: #0a2b35;
+  --glass-1: rgba(255,255,255,0.028);
+  --glass-2: rgba(255,255,255,0.06);
+  --accent: #6dd3ff;          /* primary LED accent */
+  --accent-2: #7be38b;        /* arrival/success */
+  --danger: #ff6b6b;          /* alarm */
   --muted: #98a6b6;
-  --accent: #6dd3ff;
-  --accent-2: #7be38b;
-  --danger: #ff6b6b;
-  --glass: rgba(255,255,255,0.02);
-  --elev-main: #0f3a4a;
-  --elev-contrast: #0fa0c2;
-  --shadow: rgba(0,0,0,0.6);
+  --muted-2: #7e93a3;
 
-  /* Typography */
+  /* metallic finishes */
+  --metal-1: linear-gradient(180deg,#303235 0%, #17191b 100%);
+  --metal-2: linear-gradient(180deg,#474b4d 0%, #212325 100%);
+
+  /* fonts & sizes */
   --font-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+  --size-panel-w: 360px;      /* passenger panel width */
 
-  /* Spacing */
+  /* spacings */
   --gap: 12px;
-  --radius: 10px;
+  --radius: 12px;
+  --pad: 14px;
 
-  /* Animation */
+  /* shadows */
+  --shadow-1: 0 8px 30px rgba(0,0,0,0.6);
+  --shadow-2: 0 18px 48px rgba(0,0,0,0.7);
+
+  /* animations */
   --door-duration: 420ms;
-  --ease-default: cubic-bezier(.2,.9,.3,1);
+  --door-ease: cubic-bezier(.2,.9,.3,1);
+  --btn-press: 120ms;
+  --soft-ease: cubic-bezier(.22,.9,.32,1);
+
+  /* misc */
+  --glass-frost: rgba(255,255,255,0.028);
+  --focus-color: rgba(100,180,255,0.14);
+  --debug-border: rgba(255,0,0,0.06);
 }
 
-/* Reduced motion preference */
+/* Respect reduced motion preference */
 @media (prefers-reduced-motion: reduce) {
-  :root { --door-duration: 10ms; }
+  :root { --door-duration: 60ms; --btn-press: 20ms; }
   * { scroll-behavior: auto !important; animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }
 
-/* =========================
-   Base layout & page
-   ========================= */
+/* ========================================================================
+   GLOBAL BASE
+   ======================================================================== */
 * { box-sizing: border-box; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
-html,body { height:100%; margin:0; background: linear-gradient(180deg,#031021 0%, #061627 100%); color:#e6f0f8; font-family:var(--font-sans); font-size:15px; line-height:1.3; }
-.app { max-width:1200px; margin:20px auto; padding:18px; display:grid; grid-template-rows:auto 1fr; gap:16px; }
+html,body { height:100%; margin:0; background: linear-gradient(180deg, var(--bg-0), #051426); color:#e8f7ff; font-family:var(--font-sans); font-size:15px; line-height:1.35; }
+.app { max-width:1200px; margin:20px auto; padding:18px; display:grid; grid-template-rows:auto 1fr; gap:18px; }
 
-/* Header */
-.header { display:flex; justify-content:space-between; align-items:center; gap:10px; }
-.brand-title { margin:0; font-weight:800; letter-spacing:1px; font-size:18px; color:var(--accent); }
+/* header */
+.header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.brand-title { margin:0; font-weight:900; letter-spacing:1px; font-size:18px; color:var(--accent); }
 .brand-sub { margin:0; color:var(--muted); font-size:13px; }
 
-/* Main grid: left = visual, right = panel
-   For smaller screens it stacks column */
-.main-grid { display:grid; grid-template-columns: 1fr 360px; gap:16px; align-items:start; }
-@media (max-width:980px) {
-  .main-grid { grid-template-columns: 1fr; }
+/* main layout */
+.main-grid { display:grid; grid-template-columns: 1fr var(--size-panel-w); gap:18px; align-items:start; }
+@media (max-width:980px) { .main-grid { grid-template-columns: 1fr; } }
+
+/* ========================================================================
+   VISUAL AREA & CANVAS
+   ======================================================================== */
+.visual-area {
+  border-radius: calc(var(--radius) + 4px);
+  padding:12px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(0,0,0,0.06));
+  box-shadow: var(--shadow-1);
+  min-height:520px;
+  position:relative;
+  overflow:hidden;
 }
 
-/* =========================
-   Visual area / canvas
-   ========================= */
-.visual-area { background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.06)); border-radius:var(--radius); padding:12px; box-shadow: 0 8px 30px var(--shadow); min-height:520px; position:relative; overflow:hidden; }
-
-/* Canvas styles (script will draw into this) */
-#shaftCanvas { display:block; width:100%; height:100%; border-radius:8px; background: linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.10)); }
-
-/* sr-only utility */
-.sr-only {
-  position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
+/* the canvas that script draws into */
+#shaftCanvas {
+  display:block;
+  width:100%;
+  height:100%;
+  border-radius:10px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.12));
+  box-shadow: inset 0 6px 18px rgba(0,0,0,0.45);
 }
 
-/* Visual fallback (when canvas not used) */
-.visual-fallback { display:flex; gap:12px; align-items:center; justify-content:flex-start; padding:6px; color:var(--muted); }
-.fallback-floor { font-size:28px; font-weight:800; color:var(--accent); }
+/* visual fallback */
+.visual-fallback { display:flex; gap:12px; align-items:center; padding:8px; color:var(--muted); }
+.fallback-floor { font-size:28px; font-weight:900; color:var(--accent); }
 .fallback-door { font-size:13px; color:var(--muted); }
 
-/* Overlay quick controls */
-.overlay-controls { position:absolute; top:10px; right:10px; display:flex; gap:8px; z-index:60; }
-.oc-btn { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.04); color:#eaf6ff; padding:6px 8px; border-radius:8px; cursor:pointer; font-weight:600; }
-.oc-btn:active { transform:translateY(1px); }
+/* subtle vignette overlay for depth */
+.visual-area::after {
+  content:''; position:absolute; inset:0; pointer-events:none; border-radius:inherit;
+  background: radial-gradient(900px 320px at 20% 10%, rgba(255,255,255,0.02), transparent 6%),
+              linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.24) 95%);
+  mix-blend-mode:multiply; z-index:4;
+}
 
-/* =========================
-   Passenger panel (right)
-   ========================= */
-.passenger-panel { background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.04)); border-radius:var(--radius); padding:14px; box-shadow: 0 8px 24px var(--shadow); display:flex; flex-direction:column; gap:12px; min-height:520px; }
+/* thin frame around canvas */
+.visual-area .frame {
+  position:absolute; inset:10px; border-radius:8px; pointer-events:none; z-index:6;
+  border:1px solid rgba(255,255,255,0.02); box-shadow: inset 0 2px 12px rgba(255,255,255,0.01);
+}
 
-/* Display */
-.display { background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.04)); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
-.display-big { font-family: var(--font-mono); font-weight:900; font-size:44px; color:var(--accent); letter-spacing:2px; line-height:1; }
-.display-direction { font-size:22px; color:var(--muted); transform:translateY(-6px); }
-.display-small { color:var(--muted); font-size:13px; }
+/* decorative cables (pure css) left/top to give lift-realism */
+.shaft-cables {
+  position:absolute; left:36px; top:6px; bottom:6px; width:42px; pointer-events:none; z-index:5;
+}
+.shaft-cables::before, .shaft-cables::after {
+  content:''; position:absolute; left:12px; top:0; bottom:10px; width:2px; background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.14)); transform:skewX(-2deg);
+}
+.shaft-cables::after { left:28px; opacity:0.07; }
 
-/* Cabin controls */
+/* ========================================================================
+   PASSENGER PANEL (RIGHT)
+   ======================================================================== */
+.passenger-panel {
+  width:var(--size-panel-w);
+  background: linear-gradient(180deg, rgba(255,255,255,0.018), rgba(0,0,0,0.04));
+  border-radius:var(--radius);
+  padding:var(--pad);
+  box-shadow: var(--shadow-2);
+  display:flex; flex-direction:column; gap:12px; min-height:520px;
+  position:relative;
+}
+
+/* small glossy top strip for realism */
+.passenger-panel::before {
+  content:''; position:absolute; left:0; right:0; top:0; height:6px; border-top-left-radius:var(--radius); border-top-right-radius:var(--radius);
+  background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.005));
+  pointer-events:none;
+}
+
+/* ========================================================================
+   DISPLAY (FLOOR + STATUS)
+   ======================================================================== */
+.display {
+  background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(0,0,0,0.04));
+  padding:10px; border-radius:10px; display:flex; flex-direction:column; gap:8px; position:relative;
+}
+.display::after {
+  content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+  background: linear-gradient(180deg, rgba(255,255,255,0.01), transparent 24%); mix-blend-mode:overlay; opacity:0.9;
+}
+
+/* big floor number (id=displayBigFloor in HTML) */
+.display-big, #displayBigFloor {
+  font-family: var(--font-mono); font-weight:900; font-size:44px; color:var(--accent);
+  letter-spacing:2px; line-height:1; text-shadow: 0 6px 28px rgba(8,44,56,0.45), 0 1px 0 rgba(255,255,255,0.02);
+  display:flex; align-items:center; gap:8px;
+}
+
+/* small line below (id=displaySmall) */
+.display-small, #displaySmall { color:var(--muted); font-size:13px; }
+
+/* small hidden state for accessibility */
+.display-state, #displayState { font-size:12px; color:var(--muted); }
+
+/* LED indicator strip beneath display for realism */
+.display .led-strip { width:100%; height:8px; border-radius:6px; overflow:hidden; background:rgba(255,255,255,0.02); display:flex; gap:2px; }
+.display .led-strip .segment { flex:1; height:100%; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.04)); opacity:0.08; }
+.display .led-strip .segment.on { opacity:1; background: linear-gradient(180deg, rgba(160,246,255,0.85), rgba(90,205,235,0.8)); box-shadow: 0 8px 26px rgba(60,200,245,0.08); }
+
+/* arrival pulse class (applied by script) */
+.arrival-pulse { animation: arrivalPulse 700ms var(--soft-ease); }
+@keyframes arrivalPulse {
+  0% { transform: scale(1); box-shadow:none; }
+  40% { transform: scale(1.03); box-shadow: 0 14px 40px rgba(2,60,80,0.22); }
+  100% { transform: scale(1); box-shadow:none; }
+}
+
+/* =========================================================================
+   CABIN CONTROLS: open/close/alarm & audio toggle
+   - In HTML: #btnDoorOpen #btnDoorClose #btnAlarm #audioToggle
+   ========================================================================= */
 .cabin-controls { display:flex; flex-direction:column; gap:12px; }
-
-/* Row buttons */
 .btn-row { display:flex; gap:8px; align-items:center; }
+
+/* generic control button */
 .control-btn {
-  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.08));
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.06));
   border:1px solid rgba(255,255,255,0.04);
-  color:#e9f7ff;
+  color:#eaf7ff;
   padding:10px 12px;
   border-radius:8px;
   cursor:pointer;
   min-width:88px;
   font-weight:700;
-  letter-spacing:0.3px;
-}
-.control-btn:active { transform:translateY(1px); }
-.control-btn.alarm { background:linear-gradient(180deg,#3e0b0b,#5a1111); color:var(--danger); box-shadow:0 6px 18px rgba(255,107,107,0.06); }
-
-/* Floor buttons: realistic grid */
-.floor-buttons { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; max-height:280px; overflow:auto; padding:6px; border-radius:8px; background:rgba(255,255,255,0.01); }
-.floor-btn {
-  background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.06));
-  border:1px solid rgba(255,255,255,0.03);
-  color:#dff7ff;
-  padding:10px;
-  border-radius:8px;
-  font-weight:800;
-  font-family:var(--font-mono);
-  cursor:pointer;
-  text-align:center;
+  letter-spacing:0.2px;
+  transition: transform var(--btn-press) var(--soft-ease), box-shadow 160ms var(--soft-ease), background 160ms var(--soft-ease);
   user-select:none;
-  transition: transform 120ms var(--ease-default), box-shadow 120ms var(--ease-default), background 120ms var(--ease-default);
 }
-.floor-btn:hover { transform:translateY(-3px); box-shadow:0 8px 18px rgba(0,0,0,0.45); }
+.control-btn:active { transform: translateY(1px) scale(.998); }
+.control-btn:focus { outline: 3px solid var(--focus-color); outline-offset:2px; border-radius:8px; }
+
+/* alarm button */
+.control-btn.control-alarm, .control-btn.alarm {
+  background: linear-gradient(180deg,#3e0b0b,#5a1111); color:var(--danger);
+  box-shadow: 0 8px 26px rgba(255,80,80,0.06); border-color: rgba(255,80,80,0.12);
+}
+
+/* audio simple toggle */
+#audioToggle { background:transparent; border:0; color:var(--muted); font-size:18px; cursor:pointer; padding:6px; border-radius:6px; }
+#audioToggle[aria-pressed="true"] { color:var(--accent); }
+
+/* =========================================================================
+   ACTION PANEL (Masuk / Keluar) — #actionPanel or .passenger-actions.
+   Ensure it is clickable, visible, accessible.
+   ========================================================================= */
+#actionPanel, .passenger-actions { display:flex; gap:8px; justify-content:space-between; width:100%; align-items:center; margin-top:6px; z-index:140; }
+#actionPanel .action-btn, .passenger-actions .action-btn {
+  flex:1; padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,0.04);
+  background: linear-gradient(180deg, rgba(255,255,255,0.012), rgba(0,0,0,0.03)); color:#eaf9ff; font-weight:800; cursor:pointer;
+  transition: transform var(--btn-press) var(--soft-ease), box-shadow 160ms var(--soft-ease);
+}
+#actionPanel .action-btn.enter { background-image: linear-gradient(180deg, rgba(110,220,255,0.06), rgba(20,60,80,0.06)); color:var(--accent); }
+#actionPanel .action-btn.exit  { background-image: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.04)); color:#eaf7ff; }
+#actionPanel .action-btn:focus { outline: 3px solid var(--focus-color); outline-offset:2px; }
+
+/* disabled state */
+.action-btn[disabled], .action-btn.disabled { opacity:0.45; pointer-events:none; }
+
+/* =========================================================================
+   FLOOR KEYPAD (internal) — .floor-buttons, .floor-btn
+   ========================================================================= */
+.floor-buttons {
+  display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; max-height:320px; overflow:auto; padding:6px; border-radius:8px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.04));
+}
+.floor-btn {
+  display:flex; align-items:center; justify-content:center; gap:8px;
+  padding:10px; border-radius:8px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.06));
+  border:1px solid rgba(255,255,255,0.03);
+  color:#dff7ff; font-weight:900; font-family:var(--font-mono); cursor:pointer;
+  user-select:none; transition: transform 120ms var(--soft-ease), box-shadow 140ms var(--soft-ease);
+}
+.floor-btn:hover { transform: translateY(-3px); box-shadow:0 12px 30px rgba(0,0,0,0.45); }
+.floor-btn:active { transform: translateY(1px); }
 .floor-btn[aria-pressed="true"], .floor-btn.active {
-  background:linear-gradient(180deg,#63d3ff,#2fb3d9);
-  color:#00181c;
-  box-shadow:0 10px 30px rgba(47,179,217,0.12);
+  background: linear-gradient(180deg,#63d3ff,#2fb3d9);
+  color:#00181c; box-shadow:0 12px 34px rgba(47,179,217,0.12);
 }
+.floor-btn .floor-num { font-family:var(--font-mono); font-weight:900; }
 
-/* passenger actions */
-.passenger-actions { display:flex; gap:8px; justify-content:space-between; margin-top:6px; }
-.action-btn {
-  flex:1;
-  padding:10px 8px;
-  border-radius:8px;
-  border:1px solid rgba(255,255,255,0.04);
-  background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
-  color:#eaf9ff;
-  font-weight:700;
-  cursor:pointer;
+/* scrollbar style for keypad */
+.floor-buttons::-webkit-scrollbar { width:8px; height:8px; }
+.floor-buttons::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.03); border-radius:8px; }
+
+/* =========================================================================
+   EXTERNAL CALL PANEL (up/down) — .call-up .call-down
+   ========================================================================= */
+.external-call-panel { padding:6px; border-radius:8px; background:transparent; }
+.call-up, .call-down {
+  width:46px; height:46px; border-radius:8px; display:inline-grid; place-items:center;
+  border:1px solid rgba(255,255,255,0.04); cursor:pointer; font-weight:900; user-select:none;
+  background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.04)); color:#eaf7ff; font-size:18px;
+  transition: transform 120ms var(--soft-ease), box-shadow 140ms var(--soft-ease);
 }
-.action-btn:active { transform:translateY(1px); }
-.action-btn + .action-btn { margin-left:6px; }
+.call-up:active, .call-down:active { transform: translateY(1px); }
+.external-badge { padding:6px 8px; border-radius:8px; background:rgba(255,255,255,0.02); color:var(--muted); font-size:12px; }
 
-/* Readouts */
-.readouts { background:rgba(255,255,255,0.01); padding:8px; border-radius:8px; display:grid; gap:6px; font-size:13px; color:var(--muted); }
-.readouts .kv { display:flex; justify-content:space-between; align-items:center; }
-.readouts .kv dt { font-weight:700; color:#cfeffb; font-size:12px; }
-.readouts .kv dd { margin:0; font-family:var(--font-mono); }
+/* =========================================================================
+   READOUTS AND GAUGES
+   ========================================================================= */
+.readouts { background: rgba(255,255,255,0.01); padding:8px; border-radius:8px; display:grid; gap:8px; color:var(--muted); }
+.readouts .kv { display:flex; justify-content:space-between; align-items:center; font-size:13px; }
+.readouts .kv dt { color:#cfeffb; font-weight:700; font-size:12px; }
+.readouts .kv dd { margin:0; font-family:var(--font-mono); color:#e6f7ff; }
 
-/* Passenger log */
-.passenger-log { background:rgba(0,0,0,0.06); border-radius:8px; padding:8px; min-height:110px; max-height:180px; overflow:auto; font-family:var(--font-mono); font-size:13px; color:#e6f7ff; }
+/* load bar / gauge */
+.load-bar { width:100%; height:10px; background:rgba(255,255,255,0.03); border-radius:8px; overflow:hidden; }
+.load-bar .fill { height:100%; width:20%; background: linear-gradient(90deg,var(--accent), #1fb9d9); box-shadow: 0 8px 20px rgba(31,185,217,0.08); }
+
+/* speed readout small */
+.speed-readout { font-family:var(--font-mono); font-size:13px; color:var(--muted-2); }
+
+/* =========================================================================
+   PASSENGER LOG
+   ========================================================================= */
+.passenger-log { background: linear-gradient(180deg, rgba(0,0,0,0.05), rgba(0,0,0,0.02)); border-radius:8px; padding:8px; font-family:var(--font-mono); max-height:220px; overflow:auto; }
 .log-line { display:flex; gap:8px; align-items:flex-start; padding:6px 4px; border-bottom:1px dashed rgba(255,255,255,0.02); }
-.log-line .log-time { color:var(--muted); font-size:11px; min-width:72px; display:inline-block; }
-.log-line .log-text { flex:1; }
+.log-line .log-time { color:var(--muted); font-size:11px; min-width:72px; }
+.log-line .log-text { color:#dff7ff; }
 
-/* Panel footer */
-.panel-footer { font-size:12px; color:var(--muted); }
-
-/* =========================
-   Modal styles
-   ========================= */
-.modal { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.5); opacity:0; pointer-events:none; transition:opacity 220ms var(--ease-default); z-index:200; }
+/* =========================================================================
+   MODAL
+   ========================================================================= */
+.modal { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.56); opacity:0; pointer-events:none; transition:opacity 220ms var(--soft-ease); z-index:900; }
 .modal[aria-hidden="false"] { opacity:1; pointer-events:auto; }
-.modal-content { background:linear-gradient(180deg,#071427,#071b2c); border-radius:12px; padding:18px; width:min(680px, 94%); box-shadow:0 20px 60px rgba(0,0,0,0.6); color:#eaf6ff; }
-.modal-content h2 { margin:0 0 8px 0; font-size:18px; }
-.modal-message { margin-bottom:12px; color:var(--muted); }
-.modal-actions { text-align:right; }
-.modal-btn { padding:8px 12px; border-radius:8px; background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01)); border:1px solid rgba(255,255,255,0.03); color:#eaf7ff; }
+.modal-content { width:min(680px,94%); background: linear-gradient(180deg,#071427,#071b2c); border-radius:12px; padding:18px; color:#eaf6ff; box-shadow: 0 20px 60px rgba(0,0,0,0.7); }
+.modal-message { color:var(--muted); margin-bottom:12px; }
 
-/* =========================
-   Small utilities
-   ========================= */
-.kv { display:flex; justify-content:space-between; gap:10px; }
-.small { font-size:13px; color:var(--muted); }
-.center { display:flex; align-items:center; justify-content:center; }
+/* =========================================================================
+   HELPERS, STATES, DEBUG
+   ========================================================================= */
+/* door-state helper class (script toggles on root .app or passenger panel) */
+.door-state-open .readout-door, .door-state-open #readoutDoor { color:var(--accent-2); }
+.door-state-closed .readout-door, .door-state-closed #readoutDoor { color:var(--muted); }
 
-/* Focus and accessibility outlines */
-:focus { outline: 3px solid rgba(100,180,255,0.14); outline-offset:3px; border-radius:6px; }
-button:focus { outline: 3px solid rgba(130,217,255,0.12); outline-offset:2px; }
+/* emergency state */
+.state-emergency .display-big, .state-emergency .display-small { color:var(--danger); }
 
-/* Disabled / state styles */
-[disabled], .disabled { opacity:0.45; pointer-events:none; filter:grayscale(0.15); }
+/* debug border (toggle body.debug-mode to visualize layout) */
+body.debug-mode * { outline: 1px dashed rgba(255,0,0,0.06); }
 
-/* =========================
-   Small "elevator-like" decorative helpers
-   ========================= */
-
-/* indicator lamp (small circle used near buttons if needed) */
-.indicator {
-  width:10px; height:10px; border-radius:50%; background:rgba(255,255,255,0.06); box-shadow:inset 0 -2px 3px rgba(0,0,0,0.25);
-}
-.indicator.on { background:var(--accent); box-shadow:0 6px 18px rgba(99,211,255,0.08); }
-
-/* digital font look for readouts when available */
-.display-big, .display-small, .readouts .kv dd { font-variant-numeric: tabular-nums; }
-
-/* =========================
-   Helpful classes for script.js
-   ========================= */
-/* door-open/closed classes (script may toggle on container or element) */
-.door-state-open .readout-door,
-.door-state-open #readoutDoor,
-.door-state-open .fallback-door { color:var(--accent-2); }
-.door-state-closed .readout-door,
-.door-state-closed #readoutDoor { color:var(--muted); }
-
-/* arrival pulse for display */
-.arrival-pulse { animation: arrivalPulse 700ms var(--ease-default); }
-@keyframes arrivalPulse {
-  0% { transform: scale(1); box-shadow: 0 0 0 rgba(0,0,0,0); }
-  40% { transform: scale(1.03); box-shadow: 0 12px 30px rgba(0,0,0,0.45); }
-  100% { transform: scale(1); box-shadow: 0 0 0 rgba(0,0,0,0); }
+/* tiny helper to hide elements for printing */
+@media print {
+  .visual-area, .passenger-log, .control-btn, #audioToggle { display:none !important; }
+  .passenger-panel { box-shadow:none; background:#fff; color:#000; }
 }
 
-/* small responsive adjustments */
-@media (max-width:640px){
+/* =========================================================================
+   ACCESSIBILITY & FOCUS
+   ========================================================================= */
+:focus { outline: 3px solid var(--focus-color); outline-offset:3px; border-radius:6px; }
+button:focus { outline:3px solid rgba(130,217,255,0.12); outline-offset:2px; border-radius:6px; }
+
+/* ensure keyboard-only usability for action panel & keypad */
+#actionPanel .action-btn, .floor-btn, .call-up, .call-down, .control-btn { -webkit-tap-highlight-color: transparent; }
+#actionPanel .action-btn:focus, .floor-btn:focus, .call-up:focus, .call-down:focus { box-shadow: 0 0 0 4px rgba(100,180,255,0.06); transform: none; }
+
+/* =========================================================================
+   RESPONSIVE TWEAKS
+   ========================================================================= */
+@media (max-width:980px) {
+  .passenger-panel { width:100%; order:2; min-height: auto; }
   .display-big { font-size:36px; }
-  .main-grid { gap:10px; }
-  .passenger-panel { padding:10px; }
-  .floor-buttons { grid-template-columns: repeat(3, 1fr); max-height:200px; }
+  .floor-buttons { grid-template-columns: repeat(3, 1fr); max-height:220px; }
 }
 
-/* =========================
-   End of style.css
-   ========================= */
+/* =========================================================================
+   POLISH / VISUAL NOISE LAYERS (Optional — add realism)
+   - subtle brushed metal pattern, micro-scratches, noise overlay
+   ========================================================================= */
+
+/* apply micro-scratch overlay to passenger panel for realism */
+.passenger-panel::after {
+  content:''; position:absolute; inset:0; border-radius:calc(var(--radius) + 0px); pointer-events:none;
+  background-image:
+    linear-gradient(transparent 50%, rgba(255,255,255,0.006) 51%),
+    linear-gradient(90deg, rgba(255,255,255,0.002), rgba(0,0,0,0.002));
+  mix-blend-mode: overlay; opacity:0.6; z-index:2;
+}
+
+/* small edge shadow for depth */
+.passenger-panel .edge-shadow { position:absolute; left:-8px; top:8px; bottom:8px; width:8px; pointer-events:none; background: linear-gradient(90deg, rgba(0,0,0,0.22), transparent); border-radius:inherit; z-index:1; }
+
+/* ========================================================================
+   EXTRA: small, re-usable component styles (icons, lamps, segment display)
+   ======================================================================== */
+
+/* indicator lamp */
+.indicator { width:10px; height:10px; border-radius:50%; background: rgba(255,255,255,0.06); box-shadow: inset 0 -2px 3px rgba(0,0,0,0.25); }
+.indicator.on { background: var(--accent); box-shadow: 0 8px 20px rgba(110,220,255,0.06); }
+
+/* 7-seg style for small readouts (optional: script can toggle classes) */
+.seg7 { display:inline-block; font-family:var(--font-mono); background:var(--seg-bg); padding:6px 8px; border-radius:6px; }
+.seg7 .digit { color:var(--seg-on); text-shadow: 0 6px 18px rgba(0,0,0,0.42); }
+
+/* small helpers for invisible labels (a11y) */
+.sr-only { position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
+/* =========================================================================
+   NOTES / TUNING
+   - To change auto-close time or button behavior, adjust script.js (not CSS)
+   - Most visuals controlled by CSS variables at top for easy theming
+   ========================================================================= */

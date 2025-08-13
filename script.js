@@ -1,5 +1,7 @@
 // script.js
 // The Only Lift — Passenger-first, robust, auto-enter/auto-exit, perfect-ish simulator
+// + Alarm fixed, manual Masuk/Keluar buttons, idempotent action guards
+// + FIX: use existing #actionPanel if present, ensure auto-close 10s, ensure action buttons clickable
 // Usage: include as <script type="module" src="script.js" defer></script>
 
 const LiftSim = (function () {
@@ -35,7 +37,9 @@ const LiftSim = (function () {
     randomEventRatePerSec: 0.00045,
     autoBoardDelayMs: 220,
     autoExitDelayMs: 220,
-    doorActionCooldownMs: 900
+    doorActionCooldownMs: 900,
+    // default auto-close = 10000 ms (10 seconds)
+    doorAutoCloseMs: 10000
   };
 
   // merge config from <script id="app-config"> JSON if present
@@ -46,11 +50,12 @@ const LiftSim = (function () {
       const parsed = JSON.parse(cfgNode.textContent);
       CFG = Object.assign(CFG, parsed);
       CFG.physics = Object.assign(DEFAULT_CFG.physics, parsed.physics || {});
+      if (parsed.doorAutoCloseMs !== undefined) CFG.doorAutoCloseMs = parsed.doorAutoCloseMs;
     } catch (e) {
       console.warn('Invalid app-config JSON, using defaults.', e);
     }
   }
-  // override with data-* on #app if present
+  // override with data-* on #app if present (including doorAutoCloseMs)
   if (ROOT) {
     if (ROOT.dataset.floors) CFG.floors = parseInt(ROOT.dataset.floors, 10);
     if (ROOT.dataset.initialFloor) CFG.initialFloor = parseInt(ROOT.dataset.initialFloor, 10);
@@ -58,6 +63,10 @@ const LiftSim = (function () {
     if (ROOT.dataset.maxSpeedMps) CFG.maxSpeedMps = parseFloat(ROOT.dataset.maxSpeedMps);
     if (ROOT.dataset.floorHeightMeters) CFG.floorHeightMeters = parseFloat(ROOT.dataset.floorHeightMeters);
     if (ROOT.dataset.persistenceKey) CFG.persistenceKey = ROOT.dataset.persistenceKey;
+    if (ROOT.dataset.doorAutoCloseMs) {
+      const v = parseInt(ROOT.dataset.doorAutoCloseMs, 10);
+      if (!Number.isNaN(v)) CFG.doorAutoCloseMs = v;
+    }
   }
 
   // DOM references (fall back gracefully)
@@ -83,8 +92,38 @@ const LiftSim = (function () {
     audioToggle: document.getElementById('audioToggle'),
     modal: document.getElementById('modal'),
     modalMessage: document.getElementById('modalMessage'),
-    modalClose: document.getElementById('modalClose')
+    modalClose: document.getElementById('modalClose'),
+    // CRITICAL: pick up existing actionPanel if present in HTML
+    actionPanel: document.getElementById('actionPanel')
   };
+
+  // If actionPanel exists in HTML, ensure it has accessible role/label
+  if (DOM.actionPanel) {
+    DOM.actionPanel.setAttribute('role', DOM.actionPanel.getAttribute('role') || 'region');
+    DOM.actionPanel.setAttribute('aria-label', DOM.actionPanel.getAttribute('aria-label') || 'Tindakan cepat (Masuk/Keluar)');
+    DOM.actionPanel.setAttribute('aria-live', DOM.actionPanel.getAttribute('aria-live') || 'polite');
+  } else {
+    // create actionPanel and append inside passengerPanel or ROOT
+    const ap = document.createElement('div');
+    ap.id = 'actionPanel';
+    ap.className = 'action-panel';
+    ap.setAttribute('role', 'region');
+    ap.setAttribute('aria-label', 'Tindakan cepat (Masuk/Keluar)');
+    ap.setAttribute('aria-live', 'polite');
+    // Inline safe styles to ensure clickable + above other UI elements
+    ap.style.position = ap.style.position || 'relative';
+    ap.style.zIndex = ap.style.zIndex || '9999';
+    ap.style.pointerEvents = ap.style.pointerEvents || 'auto';
+    ap.style.display = 'flex';
+    ap.style.gap = '8px';
+    ap.style.flexWrap = 'wrap';
+    ap.style.alignItems = 'center';
+    ap.style.justifyContent = 'center';
+    ap.style.marginTop = '8px';
+    const pp = document.getElementById('passengerPanel');
+    (pp || ROOT).appendChild(ap);
+    DOM.actionPanel = ap;
+  }
 
   // small safety for elements that might be missing: ensure minimal structure
   if (!DOM.passengerLog) {
@@ -236,7 +275,7 @@ const LiftSim = (function () {
   }
 
   /* -------------------------
-     Elevator Model
+     Elevator Model (with safe enter/exit helpers)
   ------------------------- */
   const EState = {
     IDLE: 'IDLE',
@@ -267,12 +306,17 @@ const LiftSim = (function () {
       this.overloadLimitKg = 1800;
       this.arrivalFloor = null;
       this.components = { door: 100, motor: 100 };
-      this.autoCloseMs = CFG.doorAutoCloseMs || 3500;
+      // Ensure elevator uses configured auto-close
+      this.autoCloseMs = CFG.doorAutoCloseMs || 10000;
       this.arrivalTs = 0;
 
       // auto boarding/exiting flags per door open cycle
       this._autoBoardHandled = false;
       this._autoExitHandled = false;
+
+      // manual/action idempotency
+      this._lastManualActionKey = null;
+      this._lastManualActionTs = 0;
     }
 
     floorToMeters(f) { return clamp(Math.floor(f), 0, this.floors - 1) * this.floorHeight; }
@@ -342,6 +386,29 @@ const LiftSim = (function () {
       return true;
     }
 
+    // NEW: idempotent/manual helpers that ensure action only runs once per actionKey
+    tryEnterOnce(actionKey, weight) {
+      // if same actionKey was executed very recently, ignore
+      if (this._lastManualActionKey === actionKey && (nowMs() - this._lastManualActionTs) < 2500) return false;
+      // attempt enter
+      const ok = this.enterPlayer(weight);
+      if (ok) {
+        this._lastManualActionKey = actionKey;
+        this._lastManualActionTs = nowMs();
+      }
+      return ok;
+    }
+
+    tryExitOnce(actionKey, weight) {
+      if (this._lastManualActionKey === actionKey && (nowMs() - this._lastManualActionTs) < 2500) return false;
+      const ok = this.exitPlayer(weight);
+      if (ok) {
+        this._lastManualActionKey = actionKey;
+        this._lastManualActionTs = nowMs();
+      }
+      return ok;
+    }
+
     popNextTarget() {
       if (this.targetFloor !== null) return;
       if (this.queue.length === 0) return;
@@ -372,7 +439,7 @@ const LiftSim = (function () {
       // while doors open: do not move
       if (this.doorsOpen && this.doorProgress > 0.05) {
         this.velocity = 0; this.acceleration = 0; this.state = EState.DOOR_OPEN;
-        // auto-close if no one inside and timed out
+        // auto-close if no one inside and timed out (uses elevator.autoCloseMs)
         if (!this.playerInside && nowMs() - this.arrivalTs > this.autoCloseMs) this.closeDoors();
         return;
       }
@@ -432,7 +499,8 @@ const LiftSim = (function () {
         pos: this.position, vel: this.velocity, acc: this.acceleration, target: this.targetFloor, queue: this.queue.slice(),
         doorsOpen: this.doorsOpen, doorProg: this.doorProgress, loadKg: this.loadKg, playerInside: this.playerInside,
         components: this.components, state: this.state, arrivalFloor: this.arrivalFloor,
-        _autoBoardHandled: this._autoBoardHandled, _autoExitHandled: this._autoExitHandled
+        _autoBoardHandled: this._autoBoardHandled, _autoExitHandled: this._autoExitHandled,
+        _lastManualActionKey: this._lastManualActionKey, _lastManualActionTs: this._lastManualActionTs
       };
     }
 
@@ -453,13 +521,16 @@ const LiftSim = (function () {
       e.arrivalFloor = obj.arrivalFloor ?? null;
       e._autoBoardHandled = !!obj._autoBoardHandled;
       e._autoExitHandled = !!obj._autoExitHandled;
+      e._lastManualActionKey = obj._lastManualActionKey ?? null;
+      e._lastManualActionTs = obj._lastManualActionTs ?? 0;
+      // ensure elevator uses configured auto-close after deserialize (CFG may be available)
+      e.autoCloseMs = CFG.doorAutoCloseMs || e.autoCloseMs || 10000;
       return e;
     }
   }
 
   /* -------------------------
      World: calls, NPCs, scheduling
-     Calls structure: { id, floor, dir, who, ts, status: 'pending'|'assigned'|'serving'|'served' }
   ------------------------- */
   class World {
     constructor() {
@@ -597,21 +668,20 @@ const LiftSim = (function () {
 
       // AUTO-BOARD (when player outside and lift opened at player's floor)
       if (!e.playerInside && liftFloor === this.playerFloor && !e._autoBoardHandled) {
+        // use actionKey to make idempotent
+        const actionKey = `autoBoard:${liftFloor}:${Math.floor(e.arrivalTs/1000)}`;
         e._autoBoardHandled = true;
-        // slight delay to feel natural
         setTimeout(() => {
           if (e.doorsOpen && e.doorProgress > 0.98 && !e.playerInside && liftFloor === this.playerFloor) {
-            const ok = e.enterPlayer(CFG.passengerWeightKg);
+            const ok = e.tryEnterOnce(actionKey, CFG.passengerWeightKg);
             if (ok) {
               this.log(`Anda masuk ke lift di lantai ${liftFloor}`);
               dispatch('lift:boarded', { floor: liftFloor });
               AudioEngine.announce('Anda masuk ke lift');
-              // when boarded, make the keypad visible and wait for user's destination selection
-              // (we keep world.playerRequestedFloor separate; user must choose)
             } else {
-              this.log('Gagal masuk (terblokir oleh kondisi).');
-              // allow re-attempt on next open
+              // allow reattempt if failed (e.g., overload) by clearing handled
               e._autoBoardHandled = false;
+              this.log('Gagal auto-masuk (terblokir).');
             }
           } else {
             e._autoBoardHandled = false;
@@ -621,20 +691,20 @@ const LiftSim = (function () {
 
       // AUTO-EXIT (if player inside and elevator arrived at player's requested floor)
       if (e.playerInside && this.playerRequestedFloor !== null && e.arrivalFloor === this.playerRequestedFloor && !e._autoExitHandled) {
+        const actionKey = `autoExit:${e.arrivalFloor}:${Math.floor(e.arrivalTs/1000)}`;
         e._autoExitHandled = true;
         setTimeout(() => {
           if (e.doorsOpen && e.doorProgress > 0.98 && e.playerInside && e.arrivalFloor === this.playerRequestedFloor) {
-            const ok = e.exitPlayer(CFG.passengerWeightKg);
+            const ok = e.tryExitOnce(actionKey, CFG.passengerWeightKg);
             if (ok) {
               this.playerFloor = e.arrivalFloor;
               this.log(`Anda keluar di lantai ${e.arrivalFloor}`);
               dispatch('lift:exited', { floor: e.arrivalFloor });
               AudioEngine.announce(`Anda tiba di lantai ${e.arrivalFloor}`);
-              // clear requested destination on exit
               this.playerRequestedFloor = null;
             } else {
-              this.log('Gagal keluar (terblokir).');
               e._autoExitHandled = false;
+              this.log('Gagal auto-keluar (terblokir).');
             }
           } else {
             e._autoExitHandled = false;
@@ -846,8 +916,7 @@ const LiftSim = (function () {
   }
 
   /* -------------------------
-     UI: external panel (single-floor up/down) & internal keypad
-     - external shows only for outside passenger, and reflects call state
+     UI: external panel (single-floor up/down), internal keypad & action panel
   ------------------------- */
   let lastRenderedSnapshot = null;
 
@@ -881,6 +950,7 @@ const LiftSim = (function () {
     up.type = 'button';
     up.setAttribute('aria-label', `Panggil naik di lantai ${f}`);
     up.textContent = '▲';
+    up.tabIndex = 0;
 
     // Down button
     const down = document.createElement('button');
@@ -888,6 +958,7 @@ const LiftSim = (function () {
     down.type = 'button';
     down.setAttribute('aria-label', `Panggil turun di lantai ${f}`);
     down.textContent = '▼';
+    down.tabIndex = 0;
 
     // If passenger already inside, don't show external buttons (UI layer manages but guard)
     if (world.elev.playerInside) {
@@ -904,10 +975,8 @@ const LiftSim = (function () {
         up.disabled = true; down.disabled = true;
         const badge = document.createElement('div');
         badge.className = 'external-badge';
-        // check if elevator has been assigned and is heading here
         const assigned = world.calls.some(c => c.floor === f && c.who === 'Passenger' && c.status === 'assigned');
-        if (assigned) badge.textContent = 'Panggilan: ditugaskan';
-        else badge.textContent = 'Panggilan: menunggu';
+        badge.textContent = assigned ? 'Panggilan: ditugaskan' : 'Panggilan: menunggu';
         row.appendChild(badge);
       } else {
         // wire click handlers (with UI protection)
@@ -991,7 +1060,91 @@ const LiftSim = (function () {
   }
 
   /* -------------------------
+     Action panel: manual Masuk / Keluar + handling (idempotent)
+     NOTE: ensure the panel is visible, pointer-events enabled and buttons focusable
+  ------------------------- */
+  function renderActionPanel(world) {
+    const ap = DOM.actionPanel;
+    if (!ap) return;
+    ap.innerHTML = '';
+    // show only when doors open essentially
+    const e = world.elev;
+    if (!(e.doorsOpen && e.doorProgress > 0.98)) {
+      ap.style.display = 'none';
+      return;
+    }
+
+    ap.style.display = 'flex';
+    ap.style.pointerEvents = 'auto';
+    ap.style.zIndex = '9999';
+
+    const liftFloor = e.metersToFloor(e.position);
+
+    // when outside at the same floor and not inside -> show Masuk
+    if (!e.playerInside && liftFloor === world.playerFloor) {
+      const btn = document.createElement('button');
+      btn.className = 'action-btn enter';
+      btn.type = 'button';
+      btn.textContent = 'Masuk';
+      btn.setAttribute('aria-label', `Masuk lift di lantai ${liftFloor}`);
+      btn.tabIndex = 0;
+      // idempotent handler using elevator.tryEnterOnce
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (btn.disabled) return;
+        btn.disabled = true;
+        setTimeout(() => { btn.disabled = false; }, 1200);
+        AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
+        const actionKey = `manualEnter:${liftFloor}:${Math.floor(e.arrivalTs/1000)}`;
+        const ok = e.tryEnterOnce(actionKey, CFG.passengerWeightKg);
+        if (ok) {
+          world.log(`Anda masuk ke lift (manual) di lantai ${liftFloor}`);
+          dispatch('lift:boarded', { floor: liftFloor });
+          AudioEngine.announce('Anda masuk ke lift');
+          buildInternalKeypad(world);
+          updatePanelsVisibility(world);
+        } else {
+          world.log('Gagal masuk (manual) — mungkin sudah masuk atau terblokir.');
+        }
+      });
+      ap.appendChild(btn);
+    }
+
+    // when inside -> show Keluar (any floor; manual exit allowed)
+    if (e.playerInside) {
+      const btn = document.createElement('button');
+      btn.className = 'action-btn exit';
+      btn.type = 'button';
+      btn.textContent = 'Keluar';
+      btn.setAttribute('aria-label', `Keluar lift di lantai ${liftFloor}`);
+      btn.tabIndex = 0;
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (btn.disabled) return;
+        btn.disabled = true;
+        setTimeout(() => { btn.disabled = false; }, 1200);
+        AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
+        const actionKey = `manualExit:${liftFloor}:${Math.floor(e.arrivalTs/1000)}`;
+        const ok = e.tryExitOnce(actionKey, CFG.passengerWeightKg);
+        if (ok) {
+          world.playerFloor = liftFloor;
+          world.log(`Anda keluar (manual) di lantai ${liftFloor}`);
+          dispatch('lift:exited', { floor: liftFloor });
+          AudioEngine.announce(`Anda turun di lantai ${liftFloor}`);
+          if (world.playerRequestedFloor === liftFloor) world.playerRequestedFloor = null;
+          buildInternalKeypad(world);
+          updatePanelsVisibility(world);
+        } else {
+          world.log('Gagal keluar (manual) — mungkin sudah keluar atau terblokir.');
+        }
+      });
+      ap.appendChild(btn);
+    }
+  }
+
+  /* -------------------------
      Panels visibility update: hide external when inside; hide cabin controls when outside
+     NOTE: Alarm left enabled at all times (so user can call help even outside).
   ------------------------- */
   function updatePanelsVisibility(world) {
     const inside = world.elev.playerInside;
@@ -999,12 +1152,13 @@ const LiftSim = (function () {
     if (DOM.externalCallPanel) DOM.externalCallPanel.style.display = !inside ? '' : 'none';
     // internal keypad visible only when inside
     if (DOM.floorPanel) DOM.floorPanel.style.display = inside ? 'grid' : 'none';
-    // cabin controls (open/close/alarm) available only inside
+    // cabin controls (open/close) available only inside; alarm remains enabled always
     if (DOM.cabinControls) DOM.cabinControls.style.display = inside ? '' : 'none';
-    // enable/disable physical door/alarm buttons
     if (DOM.btnDoorOpen) DOM.btnDoorOpen.disabled = !inside;
     if (DOM.btnDoorClose) DOM.btnDoorClose.disabled = !inside;
-    if (DOM.btnAlarm) DOM.btnAlarm.disabled = !inside;
+    // Do NOT disable alarm here — allow it anywhere
+    if (DOM.btnAlarm) DOM.btnAlarm.disabled = false;
+
     // display small text
     if (DOM.displaySmall) {
       const liftF = world.elev.metersToFloor(world.elev.position);
@@ -1015,6 +1169,7 @@ const LiftSim = (function () {
 
   /* -------------------------
      Wiring controls (door/open/close/alarm/audio toggle)
+     - alarm fixed: always active and debounced + idempotent
   ------------------------- */
   function wireControls(world) {
     // door open
@@ -1037,10 +1192,16 @@ const LiftSim = (function () {
         if (ok) AudioEngine.announce('Pintu tertutup');
       });
     }
-    // alarm
+    // alarm — FIXED: enabled always, debounced, idempotent per press
     if (DOM.btnAlarm) {
       DOM.btnAlarm.addEventListener('click', () => {
-        if (DOM.btnAlarm.disabled) return;
+        // simple debounce: ignore if pressed in last 2 seconds
+        const last = DOM.btnAlarm._lastTs || 0;
+        if (nowMs() - last < 2000) {
+          appendLogUI('Alarm: sudah dipanggil baru-baru ini.');
+          return;
+        }
+        DOM.btnAlarm._lastTs = nowMs();
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep({ freq: 240, time: 0.28, vol: 0.28 });
         appendLogUI('Alarm ditekan — bantuan diberitahu (simulasi).');
         dispatch('lift:alarm', { who: 'Passenger' });
@@ -1203,6 +1364,7 @@ const LiftSim = (function () {
 
     // re-render panels intelligently
     renderExternalPanel(world);
+    renderActionPanel(world);      // NEW: show Masuk/Keluar when door open
     updatePanelsVisibility(world);
 
     requestAnimationFrame(frame);
@@ -1235,7 +1397,7 @@ const LiftSim = (function () {
     }
   };
 
-  appendLogUI('Simulator siap — ketika Anda di luar tampil ▲/▼. Panggil lift, ia akan auto-board/exit. Tekan "m" untuk mute/unmute.');
+  appendLogUI('Simulator siap — perbaikan: action panel dari HTML akan dipakai; auto-close = ' + (CFG.doorAutoCloseMs/1000) + 's; tombol Masuk/Keluar harusnya bisa diklik. Tekan "m" untuk mute/unmute.');
   console.info('LiftSim initialized', { cfg: CFG });
 
   return { world, cfg: CFG, audio: AudioEngine };

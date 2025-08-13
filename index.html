@@ -10,12 +10,13 @@
   <!-- Optional font -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
 
-  <!-- Your stylesheet -->
+  <!-- Your stylesheet (optional) -->
   <link rel="stylesheet" href="style.css">
 
   <!-- main script (module) -->
   <script type="module" src="script.js" defer></script>
 </head>
+
 <body>
   <div id="app"
        class="app"
@@ -25,6 +26,8 @@
        data-floor-order="descending"
        data-passenger-weight-kg="75"
        data-max-speed-mps="2.5"
+       data-floor-height-meters="3.0"
+       data-door-auto-close-ms="3500"
        role="application"
        aria-label="The Only Lift - Passenger interface">
 
@@ -37,6 +40,7 @@
         </div>
 
         <div class="header-actions">
+          <!-- Audio toggle (script toggles content) -->
           <button id="audioToggle" class="tiny-btn" aria-pressed="true" title="Mute / Unmute (shortcut: m)">🔊</button>
         </div>
       </div>
@@ -70,15 +74,19 @@
 
         <!-- CABIN CONTROLS (internal keypad only shown when inside by script.js) -->
         <div id="cabinControls" class="cabin-controls" role="region" aria-label="Kontrol dalam kabin">
-          <div class="control-row">
+          <div class="control-row" role="group" aria-label="Kontrol pintu dan alarm">
             <button id="btnDoorOpen" class="control-btn" type="button" aria-label="Buka pintu">OPEN</button>
             <button id="btnDoorClose" class="control-btn" type="button" aria-label="Tutup pintu">CLOSE</button>
+            <!-- Alarm intentionally always enabled (script handles debouncing) -->
             <button id="btnAlarm" class="control-btn control-alarm" type="button" aria-label="Alarm darurat">ALARM</button>
           </div>
 
           <!-- internal floor keypad (script.js will fill this, and show only when playerInside) -->
           <nav id="floorButtons" class="floor-buttons" role="navigation" aria-label="Tombol lantai (dalam kabin)"></nav>
         </div>
+
+        <!-- ACTION PANEL (Masuk / Keluar) - script uses #actionPanel if present; included for clarity -->
+        <div id="actionPanel" class="action-panel" role="region" aria-label="Tindakan cepat (Masuk/Keluar)" aria-live="polite"></div>
 
         <!-- READOUTS -->
         <div id="readouts" class="readouts" role="region" aria-label="Informasi lift">
@@ -107,7 +115,7 @@
       </aside>
     </main>
 
-    <!-- TEMPLATES -->
+    <!-- TEMPLATES (used by script) -->
     <template id="tplFloorButton">
       <button class="floor-btn" type="button" data-floor="" aria-pressed="false">
         <span class="floor-num"></span>
@@ -143,11 +151,12 @@
         "accelLimit": 1.5,
         "brakeLimit": 2.0
       },
+      "doorAutoCloseMs": 3500,
       "persistenceKey": "only-lift-world-v1"
     }
     </script>
 
-    <!-- MODAL -->
+    <!-- MODAL (optional UI message) -->
     <div id="modal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="modalTitle">
       <div class="modal-content">
         <h2 id="modalTitle">Perhatian</h2>
@@ -170,6 +179,11 @@
     :root { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; color-scheme: light; }
     .sr-only { position: absolute !important; left: -10000px !important; top:auto !important; width:1px !important; height:1px !important; overflow:hidden; }
     .tiny-btn { background:transparent; border:0; font-size:1rem; cursor:pointer; }
+    /* minimal action-panel styling so Masuk/Keluar visible without style.css */
+    .action-panel { margin: 8px 0; display:flex; gap:8px; align-items:center; }
+    .action-panel .action-btn { padding:8px 12px; border-radius:6px; border:none; background:#0b5; color:#042; font-weight:700; cursor:pointer; }
+    .action-panel .action-btn.exit { background:#f55; color:#300; }
+    .external-badge { margin-left:8px; padding:6px 8px; background:#073241; color:#cff; border-radius:6px; font-size:12px; }
   </style>
 </body>
 </html>
