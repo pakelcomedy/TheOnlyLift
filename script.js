@@ -1,8 +1,9 @@
 // script.js
-// The Only Lift — Passenger-first, robust, auto-enter/auto-exit, perfect-ish simulator
-// + Alarm fixed, manual Masuk/Keluar buttons, idempotent action guards
-// + FIX: use existing #actionPanel if present, ensure auto-close 10s, ensure action buttons clickable
-// Usage: include as <script type="module" src="script.js" defer></script>
+// The Only Lift — User-fixed version
+// - NO auto-enter / NO auto-exit (manual only)
+// - Auto-close ALWAYS after CFG.doorAutoCloseMs when doors open
+// - Robust storage wrapper (avoids SecurityError in restricted contexts)
+// - ActionPanel attached to ROOT with high z-index so Masuk/Keluar buttons are clickable
 
 const LiftSim = (function () {
   'use strict';
@@ -14,20 +15,59 @@ const LiftSim = (function () {
   const nowMs = () => Date.now();
   const secToMs = s => s * 1000;
   const rand = (a, b) => a + Math.random() * (b - a);
-  const saveJSON = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.warn('saveJSON failed', e); } };
-  const loadJSON = (k) => { try { const s = localStorage.getItem(k); return s ? JSON.parse(s) : null; } catch (e) { console.warn('loadJSON failed', e); return null; } };
   const dispatch = (name, detail = {}) => window.dispatchEvent(new CustomEvent(name, { detail }));
+
+  /* -------------------------
+     Safe storage wrapper
+     - Avoid direct localStorage/sessionStorage calls that throw SecurityError
+  ------------------------- */
+  const safeStorage = (function () {
+    let ok = false;
+    try {
+      // feature-detect in try/catch
+      ok = !!window && typeof window.localStorage !== 'undefined';
+      // do one test access (wrapped) to detect blocked contexts
+      if (ok) {
+        try {
+          const testKey = '__ls_test__';
+          window.localStorage.setItem(testKey, '1');
+          window.localStorage.removeItem(testKey);
+          ok = true;
+        } catch (e) {
+          ok = false;
+        }
+      }
+    } catch (e) {
+      ok = false;
+    }
+    return {
+      isAvailable: () => ok,
+      set(key, value) {
+        if (!ok) return;
+        try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.warn('safeStorage.set failed', e); }
+      },
+      get(key) {
+        if (!ok) return null;
+        try {
+          const s = window.localStorage.getItem(key);
+          return s ? JSON.parse(s) : null;
+        } catch (e) { console.warn('safeStorage.get failed', e); return null; }
+      },
+      remove(key) {
+        if (!ok) return;
+        try { window.localStorage.removeItem(key); } catch (e) { console.warn('safeStorage.remove failed', e); }
+      }
+    };
+  })();
 
   /* -------------------------
      DOM & Config
   ------------------------- */
-  const ROOT = document.getElementById('app') || document.body;
+  const ROOT = document.getElementById('app') || document.querySelector('.app') || document.body;
 
-  // default config - can be overridden by #app-config JSON or data-* on #app
   const DEFAULT_CFG = {
     floors: 18,
     initialFloor: 0,
-    floorOrder: 'descending',
     passengerWeightKg: 75,
     maxSpeedMps: 2.5,
     floorHeightMeters: 3.0,
@@ -35,14 +75,11 @@ const LiftSim = (function () {
     persistenceKey: 'only-lift-world-v1',
     npcTrafficFactor: 0.02,
     randomEventRatePerSec: 0.00045,
-    autoBoardDelayMs: 220,
-    autoExitDelayMs: 220,
     doorActionCooldownMs: 900,
     // default auto-close = 10000 ms (10 seconds)
     doorAutoCloseMs: 10000
   };
 
-  // merge config from <script id="app-config"> JSON if present
   const cfgNode = document.getElementById('app-config');
   let CFG = Object.assign({}, DEFAULT_CFG);
   if (cfgNode) {
@@ -51,11 +88,9 @@ const LiftSim = (function () {
       CFG = Object.assign(CFG, parsed);
       CFG.physics = Object.assign(DEFAULT_CFG.physics, parsed.physics || {});
       if (parsed.doorAutoCloseMs !== undefined) CFG.doorAutoCloseMs = parsed.doorAutoCloseMs;
-    } catch (e) {
-      console.warn('Invalid app-config JSON, using defaults.', e);
-    }
+    } catch (e) { console.warn('Invalid app-config JSON, using defaults.', e); }
   }
-  // override with data-* on #app if present (including doorAutoCloseMs)
+
   if (ROOT) {
     if (ROOT.dataset.floors) CFG.floors = parseInt(ROOT.dataset.floors, 10);
     if (ROOT.dataset.initialFloor) CFG.initialFloor = parseInt(ROOT.dataset.initialFloor, 10);
@@ -69,7 +104,9 @@ const LiftSim = (function () {
     }
   }
 
-  // DOM references (fall back gracefully)
+  /* -------------------------
+     DOM refs (graceful fallback)
+  ------------------------- */
   const DOM = {
     canvas: document.getElementById('shaftCanvas'),
     externalCallPanel: document.getElementById('externalCallPanel'),
@@ -93,58 +130,71 @@ const LiftSim = (function () {
     modal: document.getElementById('modal'),
     modalMessage: document.getElementById('modalMessage'),
     modalClose: document.getElementById('modalClose'),
-    // CRITICAL: pick up existing actionPanel if present in HTML
     actionPanel: document.getElementById('actionPanel')
   };
 
-  // If actionPanel exists in HTML, ensure it has accessible role/label
+  // ensure actionPanel exists & accessible; attach to ROOT to avoid overlay/hit-test issues
   if (DOM.actionPanel) {
-    DOM.actionPanel.setAttribute('role', DOM.actionPanel.getAttribute('role') || 'region');
-    DOM.actionPanel.setAttribute('aria-label', DOM.actionPanel.getAttribute('aria-label') || 'Tindakan cepat (Masuk/Keluar)');
-    DOM.actionPanel.setAttribute('aria-live', DOM.actionPanel.getAttribute('aria-live') || 'polite');
+    try {
+      DOM.actionPanel.setAttribute('role', DOM.actionPanel.getAttribute('role') || 'region');
+      DOM.actionPanel.setAttribute('aria-label', DOM.actionPanel.getAttribute('aria-label') || 'Tindakan cepat (Masuk/Keluar)');
+      DOM.actionPanel.setAttribute('aria-live', DOM.actionPanel.getAttribute('aria-live') || 'polite');
+      // ensure panel is able to receive pointer events
+      DOM.actionPanel.style.pointerEvents = DOM.actionPanel.style.pointerEvents || 'auto';
+      DOM.actionPanel.style.zIndex = DOM.actionPanel.style.zIndex || '99999';
+    } catch (e) { console.warn('actionPanel attribute set failed', e); }
   } else {
-    // create actionPanel and append inside passengerPanel or ROOT
     const ap = document.createElement('div');
     ap.id = 'actionPanel';
     ap.className = 'action-panel';
     ap.setAttribute('role', 'region');
     ap.setAttribute('aria-label', 'Tindakan cepat (Masuk/Keluar)');
     ap.setAttribute('aria-live', 'polite');
-    // Inline safe styles to ensure clickable + above other UI elements
-    ap.style.position = ap.style.position || 'relative';
-    ap.style.zIndex = ap.style.zIndex || '9999';
-    ap.style.pointerEvents = ap.style.pointerEvents || 'auto';
+
+    // Place it in ROOT with fixed positioning so it's always clickable and visible
+    ap.style.position = 'absolute';
+    ap.style.right = '18px';
+    ap.style.bottom = '18px';
     ap.style.display = 'flex';
-    ap.style.gap = '8px';
     ap.style.flexWrap = 'wrap';
+    ap.style.gap = '8px';
     ap.style.alignItems = 'center';
     ap.style.justifyContent = 'center';
-    ap.style.marginTop = '8px';
-    const pp = document.getElementById('passengerPanel');
-    (pp || ROOT).appendChild(ap);
-    DOM.actionPanel = ap;
+    ap.style.pointerEvents = 'auto';
+    ap.style.zIndex = '99999';
+    // subtle background so it's visible but not obtrusive
+    ap.style.background = 'rgba(0,0,0,0.0)';
+    ap.style.padding = '4px';
+
+    // append to ROOT (app container) not inside nested panels that might block clicks
+    try {
+      (ROOT || document.body).appendChild(ap);
+      DOM.actionPanel = ap;
+    } catch (e) {
+      // fallback: append to body
+      try { document.body.appendChild(ap); DOM.actionPanel = ap; } catch (e2) { console.warn('failed to append actionPanel', e2); }
+    }
   }
 
-  // small safety for elements that might be missing: ensure minimal structure
+  // ensure other fallback nodes exist
   if (!DOM.passengerLog) {
-    const el = document.createElement('div'); el.id = 'passengerLog'; el.className = 'passenger-log'; if (ROOT) ROOT.appendChild(el); DOM.passengerLog = el;
+    const el = document.createElement('div'); el.id = 'passengerLog'; el.className = 'passenger-log';
+    if (ROOT) ROOT.appendChild(el); DOM.passengerLog = el;
   }
   if (!DOM.floorPanel) {
-    const el = document.createElement('nav'); el.id = 'floorButtons'; el.className = 'floor-buttons'; if (ROOT) ROOT.appendChild(el); DOM.floorPanel = el;
+    const el = document.createElement('nav'); el.id = 'floorButtons'; el.className = 'floor-buttons';
+    if (ROOT) ROOT.appendChild(el); DOM.floorPanel = el;
   }
   if (!DOM.externalCallPanel) {
-    const el = document.createElement('div'); el.id = 'externalCallPanel'; el.className = 'external-call-panel'; if (ROOT) ROOT.appendChild(el); DOM.externalCallPanel = el;
+    const el = document.createElement('div'); el.id = 'externalCallPanel'; el.className = 'external-call-panel';
+    if (ROOT) ROOT.appendChild(el); DOM.externalCallPanel = el;
   }
 
   /* -------------------------
-     Audio Engine
+     AudioEngine
   ------------------------- */
   const AudioEngine = (function () {
-    let ctx = null;
-    let master = null;
-    let enabled = true;
-    let tts = true;
-
+    let ctx = null, master = null, enabled = true, tts = true;
     function ensure() {
       if (ctx) return ctx;
       try {
@@ -154,71 +204,50 @@ const LiftSim = (function () {
         master.gain.value = 0.9;
         master.connect(ctx.destination);
         return ctx;
-      } catch (e) {
-        console.warn('AudioContext unavailable', e);
-        ctx = null;
-        return null;
-      }
+      } catch (e) { console.warn('AudioContext unavailable', e); ctx = null; return null; }
     }
-
-    function unlock() {
-      const c = ensure();
-      if (!c) return;
-      if (c.state === 'suspended' && c.resume) c.resume().catch(() => {});
-    }
-
+    function unlock() { const c = ensure(); if (!c) return; if (c.state === 'suspended' && c.resume) c.resume().catch(()=>{}); }
     function beep(opts = {}) {
       const { freq = 880, time = 0.06, vol = 0.14, type = 'sine' } = opts;
-      const c = ensure();
-      if (!c || !enabled) return;
+      const c = ensure(); if (!c || !enabled) return;
       try {
-        const o = c.createOscillator();
-        const g = c.createGain();
-        o.type = type;
-        o.frequency.value = freq;
-        g.gain.value = 0;
-        o.connect(g);
-        g.connect(master);
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = type; o.frequency.value = freq; g.gain.value = 0;
+        o.connect(g); g.connect(master);
         const t0 = c.currentTime;
         g.gain.linearRampToValueAtTime(vol, t0 + 0.006);
         o.start(t0);
         g.gain.exponentialRampToValueAtTime(0.0001, t0 + time);
         setTimeout(() => { try { o.stop(); o.disconnect(); g.disconnect(); } catch (_) {} }, (time + 0.05) * 1000);
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
     }
-
     function chime() {
-      const c = ensure();
-      if (!c || !enabled) return;
+      const c = ensure(); if (!c || !enabled) return;
       try {
         const t0 = c.currentTime;
         const o1 = c.createOscillator(), g1 = c.createGain();
-        o1.type = 'sine'; o1.frequency.value = 880; o1.connect(g1); g1.connect(master);
-        g1.gain.setValueAtTime(0.0001, t0); g1.gain.linearRampToValueAtTime(0.18, t0 + 0.02);
-        o1.start(t0); o1.stop(t0 + 0.28);
-
+        o1.type='sine'; o1.frequency.value=880; o1.connect(g1); g1.connect(master);
+        g1.gain.setValueAtTime(0.0001,t0); g1.gain.linearRampToValueAtTime(0.18,t0+0.02);
+        o1.start(t0); o1.stop(t0+0.28);
         const o2 = c.createOscillator(), g2 = c.createGain();
-        o2.type = 'sine'; o2.frequency.value = 660; o2.connect(g2); g2.connect(master);
-        g2.gain.setValueAtTime(0.0001, t0 + 0.18); g2.gain.linearRampToValueAtTime(0.15, t0 + 0.20);
-        o2.start(t0 + 0.18); o2.stop(t0 + 0.44);
-      } catch (e) {}
+        o2.type='sine'; o2.frequency.value=660; o2.connect(g2); g2.connect(master);
+        g2.gain.setValueAtTime(0.0001,t0+0.18); g2.gain.linearRampToValueAtTime(0.15,t0+0.20);
+        o2.start(t0+0.18); o2.stop(t0+0.44);
+      } catch(e){}
     }
-
-    function doorSwoosh(open = true) {
-      const c = ensure();
-      if (!c || !enabled) return;
+    function doorSwoosh(open=true) {
+      const c = ensure(); if (!c || !enabled) return;
       try {
         const t0 = c.currentTime;
         const o = c.createOscillator(), f = c.createBiquadFilter(), g = c.createGain();
-        o.type = 'sawtooth'; o.frequency.value = 240;
-        f.type = 'lowpass'; f.frequency.value = open ? 1600 : 1200;
+        o.type='sawtooth'; o.frequency.value=240;
+        f.type='lowpass'; f.frequency.value = open ? 1600 : 1200;
         o.connect(f); f.connect(g); g.connect(master);
-        g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(open ? 0.18 : 0.12, t0 + 0.02);
+        g.gain.setValueAtTime(0.0001,t0); g.gain.linearRampToValueAtTime(open ? 0.18 : 0.12, t0+0.02);
         o.start(t0);
-        setTimeout(() => { try { o.stop(); o.disconnect(); f.disconnect(); g.disconnect(); } catch (_) {} }, 600);
-      } catch (e) {}
+        setTimeout(()=>{ try{ o.stop(); o.disconnect(); f.disconnect(); g.disconnect(); } catch(_){} }, 600);
+      } catch(e){}
     }
-
     function announce(text) {
       if (!enabled) return;
       if (tts && window.speechSynthesis && 'SpeechSynthesisUtterance' in window) {
@@ -226,30 +255,20 @@ const LiftSim = (function () {
           const u = new SpeechSynthesisUtterance(String(text));
           const voices = window.speechSynthesis.getVoices();
           if (voices && voices.length) u.voice = voices.find(v => /id|en/i.test(v.lang)) || voices[0];
-          unlock();
-          window.speechSynthesis.speak(u);
-        } catch (e) { beep({ freq: 720, time: 0.12 }); }
-      } else beep({ freq: 720, time: 0.12 });
+          unlock(); window.speechSynthesis.speak(u);
+        } catch(e){ beep({freq:720,time:0.12}); }
+      } else beep({freq:720,time:0.12});
     }
-
-    function toggle() {
-      enabled = !enabled;
-      if (!enabled && window.speechSynthesis) window.speechSynthesis.cancel();
-      return enabled;
-    }
-
-    return { ensure, unlock, beep, chime, doorSwoosh, announce, toggle, isEnabled: () => enabled, setTts: v => { tts = !!v; } };
+    function toggle(){ enabled = !enabled; if(!enabled && window.speechSynthesis) window.speechSynthesis.cancel(); return enabled; }
+    return { ensure, unlock, beep, chime, doorSwoosh, announce, toggle, isEnabled:()=>enabled, setTts:v=>{tts=!!v;} };
   })();
 
   /* -------------------------
-     Logging / UI helpers (must be defined early)
+     Logging helper
   ------------------------- */
   function appendLogUI(msg) {
     const container = DOM.passengerLog;
-    if (!container) {
-      console.log(msg);
-      return;
-    }
+    if (!container) { console.log(msg); return; }
     const tpl = DOM.tplLogLine;
     let node;
     if (tpl && tpl.content && tpl.content.firstElementChild) {
@@ -261,30 +280,25 @@ const LiftSim = (function () {
     } else {
       node = document.createElement('div');
       node.className = 'log-line';
-      node.textContent = `[${(new Date()).toLocaleTimeString()}] ${msg}`;
+      const timeNode = document.createElement('span');
+      timeNode.className = 'log-time';
+      timeNode.textContent = (new Date()).toLocaleTimeString();
+      const textNode = document.createElement('div');
+      textNode.className = 'log-text';
+      textNode.textContent = msg;
+      node.appendChild(timeNode);
+      node.appendChild(textNode);
     }
     container.prepend(node);
     while (container.children.length > 400) container.removeChild(container.lastChild);
-
-    // accessibility live
-    if (DOM.liveStatus) {
-      DOM.liveStatus.textContent = msg;
-    }
-    // also console.debug
+    if (DOM.liveStatus) DOM.liveStatus.textContent = msg;
     console.debug('[LiftSim]', msg);
   }
 
   /* -------------------------
-     Elevator Model (with safe enter/exit helpers)
+     Elevator Model
   ------------------------- */
-  const EState = {
-    IDLE: 'IDLE',
-    MOVING: 'MOVING',
-    ARRIVED: 'ARRIVED',
-    DOOR_OPEN: 'DOOR_OPEN',
-    DOOR_CLOSED: 'DOOR_CLOSED',
-    EMERGENCY: 'EMERGENCY'
-  };
+  const EState = { IDLE:'IDLE', MOVING:'MOVING', ARRIVED:'ARRIVED', DOOR_OPEN:'DOOR_OPEN', DOOR_CLOSED:'DOOR_CLOSED', EMERGENCY:'EMERGENCY' };
 
   class Elevator {
     constructor(floors, initialFloor) {
@@ -306,15 +320,9 @@ const LiftSim = (function () {
       this.overloadLimitKg = 1800;
       this.arrivalFloor = null;
       this.components = { door: 100, motor: 100 };
-      // Ensure elevator uses configured auto-close
       this.autoCloseMs = CFG.doorAutoCloseMs || 10000;
       this.arrivalTs = 0;
-
-      // auto boarding/exiting flags per door open cycle
-      this._autoBoardHandled = false;
-      this._autoExitHandled = false;
-
-      // manual/action idempotency
+      this._autoCloseTimer = null;
       this._lastManualActionKey = null;
       this._lastManualActionTs = 0;
     }
@@ -322,7 +330,6 @@ const LiftSim = (function () {
     floorToMeters(f) { return clamp(Math.floor(f), 0, this.floors - 1) * this.floorHeight; }
     metersToFloor(m) { return Math.round(m / this.floorHeight); }
 
-    // Request a floor from inside (passenger)
     requestFloor(f) {
       const ff = clamp(Math.floor(f), 0, this.floors - 1);
       if (this.targetFloor === null && this.queue.length === 0) {
@@ -333,7 +340,6 @@ const LiftSim = (function () {
       dispatch('lift:call', { floor: ff, who: 'Passenger' });
     }
 
-    // External request simply enqueues; keep away duplicates in world.requestExternalCall
     requestExternal(f, who = 'NPC') {
       const ff = clamp(Math.floor(f), 0, this.floors - 1);
       if (this.targetFloor === null && this.queue.length === 0) {
@@ -344,20 +350,43 @@ const LiftSim = (function () {
       dispatch('lift:call', { floor: ff, who });
     }
 
+    // Open doors and schedule unconditional auto-close after autoCloseMs
     openDoors() {
       if (this.components.door < 5) return false;
       this.doorsOpen = true;
       this.state = EState.DOOR_OPEN;
       this.arrivalTs = nowMs();
-      this._autoBoardHandled = false;
-      this._autoExitHandled = false;
       AudioEngine.doorSwoosh(true);
       dispatch('lift:door', { state: 'open' });
+
+      // clear previous timer
+      if (this._autoCloseTimer) {
+        clearTimeout(this._autoCloseTimer);
+        this._autoCloseTimer = null;
+      }
+
+      const ms = Number(this.autoCloseMs) || 10000;
+      try {
+        this._autoCloseTimer = setTimeout(() => {
+          try {
+            if (this.doorsOpen) {
+              this.closeDoors();
+              appendLogUI(`Pintu otomatis ditutup setelah ${Math.round(ms / 1000)}s.`);
+            }
+          } catch (e) { /* ignore */ }
+        }, ms);
+      } catch (e) { console.warn('Auto-close scheduling failed', e); }
+
       return true;
     }
 
+    // Close doors and clear auto-close timer
     closeDoors() {
-      if (this.playerInside && this.loadKg > this.overloadLimitKg) return false;
+      if (this.components.door < 5) return false;
+      if (this._autoCloseTimer) {
+        clearTimeout(this._autoCloseTimer);
+        this._autoCloseTimer = null;
+      }
       this.doorsOpen = false;
       this.state = EState.DOOR_CLOSED;
       AudioEngine.doorSwoosh(false);
@@ -386,33 +415,23 @@ const LiftSim = (function () {
       return true;
     }
 
-    // NEW: idempotent/manual helpers that ensure action only runs once per actionKey
     tryEnterOnce(actionKey, weight) {
-      // if same actionKey was executed very recently, ignore
       if (this._lastManualActionKey === actionKey && (nowMs() - this._lastManualActionTs) < 2500) return false;
-      // attempt enter
       const ok = this.enterPlayer(weight);
-      if (ok) {
-        this._lastManualActionKey = actionKey;
-        this._lastManualActionTs = nowMs();
-      }
+      if (ok) { this._lastManualActionKey = actionKey; this._lastManualActionTs = nowMs(); }
       return ok;
     }
 
     tryExitOnce(actionKey, weight) {
       if (this._lastManualActionKey === actionKey && (nowMs() - this._lastManualActionTs) < 2500) return false;
       const ok = this.exitPlayer(weight);
-      if (ok) {
-        this._lastManualActionKey = actionKey;
-        this._lastManualActionTs = nowMs();
-      }
+      if (ok) { this._lastManualActionKey = actionKey; this._lastManualActionTs = nowMs(); }
       return ok;
     }
 
     popNextTarget() {
       if (this.targetFloor !== null) return;
       if (this.queue.length === 0) return;
-      // choose nearest
       const cur = this.metersToFloor(this.position);
       let bestIdx = 0, bestDist = Infinity;
       for (let i = 0; i < this.queue.length; i++) {
@@ -423,31 +442,19 @@ const LiftSim = (function () {
     }
 
     step(dt) {
-      // doors progression
       const ds = (1 / this.doorSpeed) * (0.5 + (this.components.door / 100) * 0.8);
       if (this.doorsOpen) this.doorProgress = clamp(this.doorProgress + ds * dt, 0, 1);
       else this.doorProgress = clamp(this.doorProgress - ds * dt, 0, 1);
 
-      // reset auto flags when doors fully closed
-      if (!this.doorsOpen && this.doorProgress <= 0.02) {
-        this._autoBoardHandled = false;
-        this._autoExitHandled = false;
-      }
-
       if (this.state === EState.EMERGENCY) return;
 
-      // while doors open: do not move
       if (this.doorsOpen && this.doorProgress > 0.05) {
         this.velocity = 0; this.acceleration = 0; this.state = EState.DOOR_OPEN;
-        // auto-close if no one inside and timed out (uses elevator.autoCloseMs)
-        if (!this.playerInside && nowMs() - this.arrivalTs > this.autoCloseMs) this.closeDoors();
         return;
       }
 
-      // decide next target if none
       if (this.targetFloor === null && this.queue.length) this.popNextTarget();
       if (this.targetFloor === null) {
-        // idle damping
         this.acceleration = -this.velocity * 1.8;
         this.velocity += this.acceleration * dt;
         this.position += this.velocity * dt;
@@ -455,13 +462,10 @@ const LiftSim = (function () {
         return;
       }
 
-      // Move toward target
       const targetPos = this.floorToMeters(this.targetFloor);
       const dist = targetPos - this.position;
       const dir = Math.sign(dist || 1);
       const absDist = Math.abs(dist);
-
-      // braking distance
       const brakingDist = (this.velocity * this.velocity) / (2 * CFG.physics.brakeLimit + 1e-6);
 
       if (absDist <= brakingDist + 0.03) {
@@ -472,21 +476,17 @@ const LiftSim = (function () {
         this.acceleration = clamp(err * 1.8, -CFG.physics.brakeLimit, CFG.physics.accelLimit);
       }
 
-      // integrate
       this.velocity += this.acceleration * dt;
       this.velocity = clamp(this.velocity, -CFG.maxSpeedMps, CFG.maxSpeedMps);
       this.position += this.velocity * dt;
       this.state = EState.MOVING;
 
-      // arrival detection
       if (absDist < 0.03 && Math.abs(this.velocity) < 0.06) {
-        // snap
         this.position = targetPos;
         this.velocity = 0; this.acceleration = 0;
         this.arrivalFloor = this.targetFloor;
         this.targetFloor = null;
         this.state = EState.ARRIVED;
-        // open doors
         this.openDoors();
         AudioEngine.chime();
         AudioEngine.announce(`Lantai ${this.arrivalFloor}`);
@@ -499,8 +499,8 @@ const LiftSim = (function () {
         pos: this.position, vel: this.velocity, acc: this.acceleration, target: this.targetFloor, queue: this.queue.slice(),
         doorsOpen: this.doorsOpen, doorProg: this.doorProgress, loadKg: this.loadKg, playerInside: this.playerInside,
         components: this.components, state: this.state, arrivalFloor: this.arrivalFloor,
-        _autoBoardHandled: this._autoBoardHandled, _autoExitHandled: this._autoExitHandled,
-        _lastManualActionKey: this._lastManualActionKey, _lastManualActionTs: this._lastManualActionTs
+        _lastManualActionKey: this._lastManualActionKey, _lastManualActionTs: this._lastManualActionTs,
+        autoCloseMs: this.autoCloseMs
       };
     }
 
@@ -519,30 +519,27 @@ const LiftSim = (function () {
       e.components = obj.components || e.components;
       e.state = obj.state || e.state;
       e.arrivalFloor = obj.arrivalFloor ?? null;
-      e._autoBoardHandled = !!obj._autoBoardHandled;
-      e._autoExitHandled = !!obj._autoExitHandled;
       e._lastManualActionKey = obj._lastManualActionKey ?? null;
       e._lastManualActionTs = obj._lastManualActionTs ?? 0;
-      // ensure elevator uses configured auto-close after deserialize (CFG may be available)
-      e.autoCloseMs = CFG.doorAutoCloseMs || e.autoCloseMs || 10000;
+      e.autoCloseMs = obj.autoCloseMs ?? CFG.doorAutoCloseMs ?? e.autoCloseMs;
       return e;
     }
   }
 
   /* -------------------------
-     World: calls, NPCs, scheduling
+     World
   ------------------------- */
   class World {
     constructor() {
       this.elev = new Elevator(CFG.floors, CFG.initialFloor);
-      this.playerFloor = CFG.initialFloor; // where the passenger currently is (outside) or last exited floor
-      this.playerRequestedFloor = null;    // numeric floor passenger requests when inside
-      this.calls = [];                     // queued external calls
+      this.playerFloor = CFG.initialFloor;
+      this.playerRequestedFloor = null;
+      this.calls = [];
       this.npcs = [];
       this.scheduled = [];
       this.logs = [];
       this.eventWindow = { start: nowMs(), count: 0, cap: 6 };
-      this.lastPlayerCall = { floor: null, dir: null, ts: 0 }; // debounce for player
+      this.lastPlayerCall = { floor: null, dir: null, ts: 0 };
       this.initNPCs();
     }
 
@@ -560,22 +557,17 @@ const LiftSim = (function () {
       appendLogUI(msg);
     }
 
-    // external call entrypoint — prevents duplicates & debounces player
     playerCall(floor, dir = 'up') {
       const now = nowMs();
-      // debounce same call by player for 1.8s
       if (this.lastPlayerCall.floor === floor && this.lastPlayerCall.dir === dir && now - (this.lastPlayerCall.ts || 0) < 1800) {
         this.log('Panggilan diabaikan (terlalu cepat).');
         return false;
       }
       this.lastPlayerCall = { floor, dir, ts: now };
-
-      // if a similar call already exists (any who) -> don't create duplicate
       if (this.calls.some(c => c.floor === floor && c.dir === dir && (c.status === 'pending' || c.status === 'assigned'))) {
         this.log(`Panggilan sudah terdaftar di lantai ${floor}`);
         return false;
       }
-
       const id = `call-${Math.floor(now)}-${Math.round(Math.random() * 9999)}`;
       const call = { id, floor, dir, who: 'Passenger', ts: now, status: 'pending' };
       this.calls.push(call);
@@ -584,13 +576,9 @@ const LiftSim = (function () {
       return true;
     }
 
-    // internal usage for NPCs or world
     requestExternalCall(floor, dir = 'up', who = 'NPC') {
       const now = nowMs();
-      // avoid duplicates for same who+floor+dir with pending/assigned
-      if (this.calls.some(c => c.floor === floor && c.dir === dir && (c.status === 'pending' || c.status === 'assigned') && c.who === who)) {
-        return;
-      }
+      if (this.calls.some(c => c.floor === floor && c.dir === dir && (c.status === 'pending' || c.status === 'assigned') && c.who === who)) return;
       const id = `call-${Math.floor(now)}-${Math.round(Math.random() * 9999)}`;
       const call = { id, floor, dir, who, ts: now, status: 'pending' };
       this.calls.push(call);
@@ -598,11 +586,8 @@ const LiftSim = (function () {
       dispatch('lift:call', { floor, dir, who });
     }
 
-    // assign nearest pending call to elevator (mark as 'assigned')
     assignCalls() {
-      // already moving to target; don't assign if elev already has target
       if (this.elev.targetFloor !== null) return;
-      // find nearest pending call
       const pending = this.calls.filter(c => c.status === 'pending');
       if (!pending.length) return;
       const cur = this.elev.metersToFloor(this.elev.position);
@@ -612,18 +597,15 @@ const LiftSim = (function () {
         if (d < bestDist) { bestDist = d; bestIdx = i; }
       }
       const chosen = pending[bestIdx];
-      // mark as assigned in calls array
       const idxAll = this.calls.findIndex(c => c.id === chosen.id);
       if (idxAll >= 0) {
         this.calls[idxAll].status = 'assigned';
         this.calls[idxAll].assignedTs = nowMs();
       }
-      // hand to elevator
       this.elev.requestExternal(chosen.floor, chosen.who);
       this.log(`Lift ditugaskan ke panggilan di lantai ${chosen.floor} (oleh ${chosen.who})`);
     }
 
-    // cleanup served calls when elevator opens at floor
     markCallServedAtFloor(floor) {
       for (let i = 0; i < this.calls.length; i++) {
         const c = this.calls[i];
@@ -654,65 +636,15 @@ const LiftSim = (function () {
 
     stepBoarding(dt) {
       const e = this.elev;
-      // only operate when doors are essentially open
       if (!(e.doorsOpen && e.doorProgress > 0.98)) return;
       if (nowMs() - e.lastDoorActionMs < e.doorCooldownMs) return;
 
       const liftFloor = e.metersToFloor(e.position);
 
-      // if there was a pending/assigned call at this floor, mark as served
-      // and prevent re-handling reentrancy
-      if (!e._autoBoardHandled) {
-        this.markCallServedAtFloor(liftFloor);
-      }
+      // mark calls served at this floor
+      this.markCallServedAtFloor(liftFloor);
 
-      // AUTO-BOARD (when player outside and lift opened at player's floor)
-      if (!e.playerInside && liftFloor === this.playerFloor && !e._autoBoardHandled) {
-        // use actionKey to make idempotent
-        const actionKey = `autoBoard:${liftFloor}:${Math.floor(e.arrivalTs/1000)}`;
-        e._autoBoardHandled = true;
-        setTimeout(() => {
-          if (e.doorsOpen && e.doorProgress > 0.98 && !e.playerInside && liftFloor === this.playerFloor) {
-            const ok = e.tryEnterOnce(actionKey, CFG.passengerWeightKg);
-            if (ok) {
-              this.log(`Anda masuk ke lift di lantai ${liftFloor}`);
-              dispatch('lift:boarded', { floor: liftFloor });
-              AudioEngine.announce('Anda masuk ke lift');
-            } else {
-              // allow reattempt if failed (e.g., overload) by clearing handled
-              e._autoBoardHandled = false;
-              this.log('Gagal auto-masuk (terblokir).');
-            }
-          } else {
-            e._autoBoardHandled = false;
-          }
-        }, CFG.autoBoardDelayMs);
-      }
-
-      // AUTO-EXIT (if player inside and elevator arrived at player's requested floor)
-      if (e.playerInside && this.playerRequestedFloor !== null && e.arrivalFloor === this.playerRequestedFloor && !e._autoExitHandled) {
-        const actionKey = `autoExit:${e.arrivalFloor}:${Math.floor(e.arrivalTs/1000)}`;
-        e._autoExitHandled = true;
-        setTimeout(() => {
-          if (e.doorsOpen && e.doorProgress > 0.98 && e.playerInside && e.arrivalFloor === this.playerRequestedFloor) {
-            const ok = e.tryExitOnce(actionKey, CFG.passengerWeightKg);
-            if (ok) {
-              this.playerFloor = e.arrivalFloor;
-              this.log(`Anda keluar di lantai ${e.arrivalFloor}`);
-              dispatch('lift:exited', { floor: e.arrivalFloor });
-              AudioEngine.announce(`Anda tiba di lantai ${e.arrivalFloor}`);
-              this.playerRequestedFloor = null;
-            } else {
-              e._autoExitHandled = false;
-              this.log('Gagal auto-keluar (terblokir).');
-            }
-          } else {
-            e._autoExitHandled = false;
-          }
-        }, CFG.autoExitDelayMs);
-      }
-
-      // NPC sparse boarding/exiting (lower probability)
+      // NPC automatic boarding/exiting (sparse)
       if (Math.random() < 0.06 * dt) {
         const w = 50 + Math.random() * 90;
         if (e.loadKg + w < e.overloadLimitKg) {
@@ -751,7 +683,6 @@ const LiftSim = (function () {
       }
     }
 
-    // simple event handler
     handleEvent(type, payload) {
       if (type === 'door_jam') {
         this.log('Door jam occurred.');
@@ -808,26 +739,22 @@ const LiftSim = (function () {
         w.scheduled = obj.scheduled || [];
         if (Array.isArray(obj.npcs)) w.npcs = obj.npcs.map(n => ({ id: n.id, nextActionMs: n.nextActionMs || nowMs() + rand(10000, 60000), busyUntil: n.busyUntil || 0 }));
         w.logs = obj.logs || [];
-      } catch (e) {
-        console.warn('deserialize fail', e);
-      }
+      } catch (e) { console.warn('deserialize fail', e); }
       return w;
     }
   }
 
   /* -------------------------
-     Canvas Renderer
+     Renderer (unchanged)
   ------------------------- */
   class Renderer {
     constructor(canvas, world) {
-      this.canvas = canvas;
-      this.world = world;
+      this.canvas = canvas; this.world = world;
       this.ctx = canvas ? canvas.getContext('2d', { alpha: false }) : null;
       this.dpr = Math.max(1, window.devicePixelRatio || 1);
       this.resize();
       window.addEventListener('resize', () => this.resize());
     }
-
     resize() {
       if (!this.canvas) return;
       const rect = this.canvas.getBoundingClientRect();
@@ -835,78 +762,41 @@ const LiftSim = (function () {
       this.canvas.height = Math.floor(Math.max(240, rect.height) * this.dpr);
       if (this.ctx && this.ctx.setTransform) this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     }
-
     draw() {
       if (!this.ctx) return;
-      const ctx = this.ctx;
-      const W = this.canvas.width / this.dpr;
-      const H = this.canvas.height / this.dpr;
+      const ctx = this.ctx; const W = this.canvas.width / this.dpr; const H = this.canvas.height / this.dpr;
       ctx.clearRect(0, 0, W, H);
-
       const pad = 12;
       const shaftW = Math.min(340, W * 0.30);
       const shaftX = pad, shaftY = pad, shaftH = H - pad * 2;
-
-      // shaft background
-      ctx.fillStyle = '#071426';
-      ctx.fillRect(shaftX, shaftY, shaftW, shaftH);
-
+      ctx.fillStyle = '#071426'; ctx.fillRect(shaftX, shaftY, shaftW, shaftH);
       const fc = this.world.elev.floors;
       const floorH = Math.max(28, Math.floor((shaftH - 8) / fc));
       const totalH = floorH * fc;
       const top = shaftY + (shaftH - totalH);
-
-      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
       ctx.font = '11px ui-monospace, monospace';
       for (let i = 0; i < fc; i++) {
         const y = top + i * floorH;
-        ctx.beginPath();
-        ctx.moveTo(shaftX, y);
-        ctx.lineTo(shaftX + shaftW, y);
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(255,255,255,0.06)';
-        ctx.fillText(`${fc - 1 - i}`, shaftX + shaftW + 8, y + 12);
+        ctx.beginPath(); ctx.moveTo(shaftX, y); ctx.lineTo(shaftX + shaftW, y); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillText(`${fc - 1 - i}`, shaftX + shaftW + 8, y + 12);
       }
-
       const carW = Math.min(170, shaftW * 0.58);
       const carH = floorH - 6;
       const carX = shaftX + (shaftW - carW) / 2;
       const posRatio = this.world.elev.position / Math.max(1, this.world.elev.floorToMeters(this.world.elev.floors - 1));
       const carY = top + (fc - 1) * floorH - posRatio * ((fc - 1) * floorH) - carH / 2;
-
-      // cables
-      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(carX + 6, carY);
-      ctx.lineTo(carX + 6, top - 8);
-      ctx.moveTo(carX + carW - 6, carY);
-      ctx.lineTo(carX + carW - 6, top - 8);
-      ctx.stroke();
-
-      // car body
-      ctx.fillStyle = '#0f3a4a';
-      ctx.fillRect(carX, carY, carW, carH);
-      ctx.fillStyle = 'rgba(255,255,255,0.03)';
-      ctx.fillRect(carX + 6, carY + 6, carW - 12, carH - 12);
-
-      // doors
-      const doorProg = this.world.elev.doorProgress;
-      const panelW = carW / 2;
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(carX + 6, carY); ctx.lineTo(carX + 6, top - 8); ctx.moveTo(carX + carW - 6, carY); ctx.lineTo(carX + carW - 6, top - 8); ctx.stroke();
+      ctx.fillStyle = '#0f3a4a'; ctx.fillRect(carX, carY, carW, carH);
+      ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(carX + 6, carY + 6, carW - 12, carH - 12);
+      const doorProg = this.world.elev.doorProgress; const panelW = carW / 2;
       const leftX = carX + (1 - doorProg) * (panelW * 0.9);
       const rightX = carX + carW - panelW - (1 - doorProg) * (panelW * 0.9);
-      ctx.fillStyle = '#021b25';
-      ctx.fillRect(leftX, carY, panelW, carH);
-      ctx.fillRect(rightX, carY, panelW, carH);
-      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-      ctx.strokeRect(carX, carY, carW, carH);
-
-      // HUD
-      ctx.fillStyle = 'rgba(0,0,0,0.36)';
-      ctx.fillRect(shaftX + 12, 10, 300, 64);
-      ctx.fillStyle = '#cfeffb';
-      ctx.font = '12px ui-monospace, monospace';
+      ctx.fillStyle = '#021b25'; ctx.fillRect(leftX, carY, panelW, carH); ctx.fillRect(rightX, carY, panelW, carH);
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.strokeRect(carX, carY, carW, carH);
+      ctx.fillStyle = 'rgba(0,0,0,0.36)'; ctx.fillRect(shaftX + 12, 10, 300, 64);
+      ctx.fillStyle = '#cfeffb'; ctx.font = '12px ui-monospace, monospace';
       ctx.fillText(`Pos: ${this.world.elev.position.toFixed(2)} m`, shaftX + 24, 30);
       ctx.fillText(`Vel: ${this.world.elev.velocity.toFixed(2)} m/s`, shaftX + 24, 52);
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
@@ -916,184 +806,99 @@ const LiftSim = (function () {
   }
 
   /* -------------------------
-     UI: external panel (single-floor up/down), internal keypad & action panel
+     UI: external panel, keypad, action panel
   ------------------------- */
   let lastRenderedSnapshot = null;
 
   function renderExternalPanel(world) {
-    const panel = DOM.externalCallPanel;
-    if (!panel) return;
+    const panel = DOM.externalCallPanel; if (!panel) return;
     const f = world.playerFloor;
-
-    // snapshot: floor + whether passenger has current pending/assigned call + elevator target + doors/open
     const hasPending = world.calls.some(c => c.floor === f && c.who === 'Passenger' && (c.status === 'pending' || c.status === 'assigned'));
     const elevTarget = world.elev.targetFloor;
     const snapshot = `${f}|pending:${hasPending}|target:${elevTarget}|doors:${world.elev.doorsOpen}|playerInside:${world.elev.playerInside}`;
     if (snapshot === lastRenderedSnapshot) return;
     lastRenderedSnapshot = snapshot;
-
     panel.innerHTML = '';
-    const row = document.createElement('div');
-    row.className = 'external-row single';
-
-    const label = document.createElement('div');
-    label.className = 'external-floor-label';
-    label.textContent = `Lantai ${f}`;
-    row.appendChild(label);
-
-    const group = document.createElement('div');
-    group.className = 'external-group single';
-
-    // Up button
-    const up = document.createElement('button');
-    up.className = 'call-up single';
-    up.type = 'button';
-    up.setAttribute('aria-label', `Panggil naik di lantai ${f}`);
-    up.textContent = '▲';
-    up.tabIndex = 0;
-
-    // Down button
-    const down = document.createElement('button');
-    down.className = 'call-down single';
-    down.type = 'button';
-    down.setAttribute('aria-label', `Panggil turun di lantai ${f}`);
-    down.textContent = '▼';
-    down.tabIndex = 0;
-
-    // If passenger already inside, don't show external buttons (UI layer manages but guard)
+    const row = document.createElement('div'); row.className = 'external-row single';
+    const label = document.createElement('div'); label.className = 'external-floor-label'; label.textContent = `Lantai ${f}`; row.appendChild(label);
+    const group = document.createElement('div'); group.className = 'external-group single';
+    const up = document.createElement('button'); up.className = 'call-up single'; up.type='button'; up.setAttribute('aria-label', `Panggil naik di lantai ${f}`); up.textContent='▲'; up.tabIndex=0;
+    const down = document.createElement('button'); down.className='call-down single'; down.type='button'; down.setAttribute('aria-label', `Panggil turun di lantai ${f}`); down.textContent='▼'; down.tabIndex=0;
     if (world.elev.playerInside) {
-      up.disabled = true; down.disabled = true;
-      up.title = 'Anda berada di dalam lift';
-      down.title = 'Anda berada di dalam lift';
+      up.disabled = true; down.disabled = true; up.title='Anda berada di dalam lift'; down.title='Anda berada di dalam lift';
     } else {
-      // disable up if top floor
       if (f >= CFG.floors - 1) up.disabled = true;
-      // disable down if bottom
       if (f <= 0) down.disabled = true;
-      // if there's already a pending/assigned passenger call for this floor: disable and show status
       if (hasPending) {
         up.disabled = true; down.disabled = true;
-        const badge = document.createElement('div');
-        badge.className = 'external-badge';
-        const assigned = world.calls.some(c => c.floor === f && c.who === 'Passenger' && c.status === 'assigned');
+        const badge = document.createElement('div'); badge.className='external-badge';
+        const assigned = world.calls.some(c => c.floor===f && c.who==='Passenger' && c.status==='assigned');
         badge.textContent = assigned ? 'Panggilan: ditugaskan' : 'Panggilan: menunggu';
         row.appendChild(badge);
       } else {
-        // wire click handlers (with UI protection)
-        up.addEventListener('click', (ev) => {
+        up.addEventListener('click', () => {
           if (up.disabled) return;
-          up.disabled = true;
-          setTimeout(() => { up.disabled = false; }, 900);
+          up.disabled = true; setTimeout(()=>{ up.disabled=false; }, 900);
           AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
-          const ok = world.playerCall(f, 'up');
-          if (!ok) appendLogUI('Panggilan tidak dibuat (duplicate/debounce).');
+          const ok = world.playerCall(f, 'up'); if (!ok) appendLogUI('Panggilan tidak dibuat (duplicate/debounce).');
         });
-        down.addEventListener('click', (ev) => {
+        down.addEventListener('click', () => {
           if (down.disabled) return;
-          down.disabled = true;
-          setTimeout(() => { down.disabled = false; }, 900);
+          down.disabled = true; setTimeout(()=>{ down.disabled=false; }, 900);
           AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
-          const ok = world.playerCall(f, 'down');
-          if (!ok) appendLogUI('Panggilan tidak dibuat (duplicate/debounce).');
+          const ok = world.playerCall(f, 'down'); if (!ok) appendLogUI('Panggilan tidak dibuat (duplicate/debounce).');
         });
       }
     }
-
-    group.appendChild(up);
-    group.appendChild(down);
-    row.appendChild(group);
-    panel.appendChild(row);
+    group.appendChild(up); group.appendChild(down); row.appendChild(group); panel.appendChild(row);
   }
 
   function buildInternalKeypad(world) {
-    const container = DOM.floorPanel;
-    if (!container) return;
+    const container = DOM.floorPanel; if (!container) return;
     container.innerHTML = '';
     const tpl = DOM.tplFloorButton;
     for (let f = CFG.floors - 1; f >= 0; f--) {
       let btn;
-      if (tpl && tpl.content && tpl.content.firstElementChild) {
-        btn = tpl.content.firstElementChild.cloneNode(true);
-      } else {
-        btn = document.createElement('button');
-        btn.className = 'floor-btn';
-        btn.type = 'button';
-        btn.innerHTML = `<span class="floor-num">${f}</span>`;
-      }
+      if (tpl && tpl.content && tpl.content.firstElementChild) btn = tpl.content.firstElementChild.cloneNode(true);
+      else { btn = document.createElement('button'); btn.className='floor-btn'; btn.type='button'; btn.innerHTML=`<span class="floor-num">${f}</span>`; }
       btn.dataset.floor = f;
-      const span = btn.querySelector('.floor-num');
-      if (span) span.textContent = f;
-
+      const span = btn.querySelector('.floor-num'); if (span) span.textContent = f;
       btn.addEventListener('click', () => {
         if (btn.disabled) return;
-        // prevent internal double-press
-        if (btn.classList.contains('floor-selected')) {
-          appendLogUI(`Lantai ${f} sudah dipilih.`);
-          return;
-        }
-        AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep({ freq: 880, time: 0.06 });
-        if (!world.elev.playerInside) {
-          appendLogUI('Keypad hanya aktif saat berada di dalam kabin.');
-          return;
-        }
+        if (btn.classList.contains('floor-selected')) { appendLogUI(`Lantai ${f} sudah dipilih.`); return; }
+        AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep({freq:880,time:0.06});
+        if (!world.elev.playerInside) { appendLogUI('Keypad hanya aktif saat berada di dalam kabin.'); return; }
         world.elev.requestFloor(f);
-        // mark as selected visually
-        btn.classList.add('floor-selected');
-        btn.setAttribute('aria-pressed', 'true');
-        // record player's requested floor so auto-exit can act
+        btn.classList.add('floor-selected'); btn.setAttribute('aria-pressed','true');
         world.playerRequestedFloor = f;
         appendLogUI(`Meminta lantai ${f}`);
       });
-
       container.appendChild(btn);
     }
-    // initial visibility
     container.style.display = world.elev.playerInside ? 'grid' : 'none';
   }
 
   function clearSelectedKeypadButton(floor) {
     const btn = DOM.floorPanel.querySelector(`.floor-btn[data-floor="${floor}"]`);
-    if (btn) {
-      btn.classList.remove('floor-selected');
-      btn.setAttribute('aria-pressed', 'false');
-    }
+    if (btn) { btn.classList.remove('floor-selected'); btn.setAttribute('aria-pressed','false'); }
   }
 
-  /* -------------------------
-     Action panel: manual Masuk / Keluar + handling (idempotent)
-     NOTE: ensure the panel is visible, pointer-events enabled and buttons focusable
-  ------------------------- */
   function renderActionPanel(world) {
-    const ap = DOM.actionPanel;
-    if (!ap) return;
+    const ap = DOM.actionPanel; if (!ap) return;
     ap.innerHTML = '';
-    // show only when doors open essentially
     const e = world.elev;
-    if (!(e.doorsOpen && e.doorProgress > 0.98)) {
-      ap.style.display = 'none';
-      return;
-    }
-
-    ap.style.display = 'flex';
-    ap.style.pointerEvents = 'auto';
-    ap.style.zIndex = '9999';
-
+    if (!(e.doorsOpen && e.doorProgress > 0.98)) { ap.style.display='none'; return; }
+    ap.style.display='flex'; ap.style.pointerEvents='auto'; ap.style.zIndex='99999';
     const liftFloor = e.metersToFloor(e.position);
 
-    // when outside at the same floor and not inside -> show Masuk
+    // Masuk (manual)
     if (!e.playerInside && liftFloor === world.playerFloor) {
-      const btn = document.createElement('button');
-      btn.className = 'action-btn enter';
-      btn.type = 'button';
-      btn.textContent = 'Masuk';
-      btn.setAttribute('aria-label', `Masuk lift di lantai ${liftFloor}`);
-      btn.tabIndex = 0;
-      // idempotent handler using elevator.tryEnterOnce
+      const btn = document.createElement('button'); btn.className='action-btn enter'; btn.type='button'; btn.textContent='Masuk';
+      btn.setAttribute('aria-label', `Masuk lift di lantai ${liftFloor}`); btn.tabIndex=0;
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         if (btn.disabled) return;
-        btn.disabled = true;
-        setTimeout(() => { btn.disabled = false; }, 1200);
+        btn.disabled = true; setTimeout(()=>{ btn.disabled=false; }, 1200);
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
         const actionKey = `manualEnter:${liftFloor}:${Math.floor(e.arrivalTs/1000)}`;
         const ok = e.tryEnterOnce(actionKey, CFG.passengerWeightKg);
@@ -1103,26 +908,19 @@ const LiftSim = (function () {
           AudioEngine.announce('Anda masuk ke lift');
           buildInternalKeypad(world);
           updatePanelsVisibility(world);
-        } else {
-          world.log('Gagal masuk (manual) — mungkin sudah masuk atau terblokir.');
-        }
+        } else world.log('Gagal masuk (manual) — mungkin sudah masuk atau terblokir.');
       });
       ap.appendChild(btn);
     }
 
-    // when inside -> show Keluar (any floor; manual exit allowed)
+    // Keluar (manual)
     if (e.playerInside) {
-      const btn = document.createElement('button');
-      btn.className = 'action-btn exit';
-      btn.type = 'button';
-      btn.textContent = 'Keluar';
-      btn.setAttribute('aria-label', `Keluar lift di lantai ${liftFloor}`);
-      btn.tabIndex = 0;
+      const btn = document.createElement('button'); btn.className='action-btn exit'; btn.type='button'; btn.textContent='Keluar';
+      btn.setAttribute('aria-label', `Keluar lift di lantai ${liftFloor}`); btn.tabIndex=0;
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         if (btn.disabled) return;
-        btn.disabled = true;
-        setTimeout(() => { btn.disabled = false; }, 1200);
+        btn.disabled = true; setTimeout(()=>{ btn.disabled=false; }, 1200);
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
         const actionKey = `manualExit:${liftFloor}:${Math.floor(e.arrivalTs/1000)}`;
         const ok = e.tryExitOnce(actionKey, CFG.passengerWeightKg);
@@ -1134,32 +932,20 @@ const LiftSim = (function () {
           if (world.playerRequestedFloor === liftFloor) world.playerRequestedFloor = null;
           buildInternalKeypad(world);
           updatePanelsVisibility(world);
-        } else {
-          world.log('Gagal keluar (manual) — mungkin sudah keluar atau terblokir.');
-        }
+        } else world.log('Gagal keluar (manual) — mungkin sudah keluar atau terblokir.');
       });
       ap.appendChild(btn);
     }
   }
 
-  /* -------------------------
-     Panels visibility update: hide external when inside; hide cabin controls when outside
-     NOTE: Alarm left enabled at all times (so user can call help even outside).
-  ------------------------- */
   function updatePanelsVisibility(world) {
     const inside = world.elev.playerInside;
-    // external panel visible only when outside
     if (DOM.externalCallPanel) DOM.externalCallPanel.style.display = !inside ? '' : 'none';
-    // internal keypad visible only when inside
     if (DOM.floorPanel) DOM.floorPanel.style.display = inside ? 'grid' : 'none';
-    // cabin controls (open/close) available only inside; alarm remains enabled always
     if (DOM.cabinControls) DOM.cabinControls.style.display = inside ? '' : 'none';
     if (DOM.btnDoorOpen) DOM.btnDoorOpen.disabled = !inside;
     if (DOM.btnDoorClose) DOM.btnDoorClose.disabled = !inside;
-    // Do NOT disable alarm here — allow it anywhere
     if (DOM.btnAlarm) DOM.btnAlarm.disabled = false;
-
-    // display small text
     if (DOM.displaySmall) {
       const liftF = world.elev.metersToFloor(world.elev.position);
       const youState = inside ? `Anda: di dalam (asal ${world.playerFloor})` : `Anda: ${world.playerFloor} (di luar)`;
@@ -1167,12 +953,7 @@ const LiftSim = (function () {
     }
   }
 
-  /* -------------------------
-     Wiring controls (door/open/close/alarm/audio toggle)
-     - alarm fixed: always active and debounced + idempotent
-  ------------------------- */
   function wireControls(world) {
-    // door open
     if (DOM.btnDoorOpen) {
       DOM.btnDoorOpen.addEventListener('click', () => {
         if (DOM.btnDoorOpen.disabled) return;
@@ -1182,7 +963,6 @@ const LiftSim = (function () {
         if (ok) AudioEngine.announce('Pintu terbuka');
       });
     }
-    // door close
     if (DOM.btnDoorClose) {
       DOM.btnDoorClose.addEventListener('click', () => {
         if (DOM.btnDoorClose.disabled) return;
@@ -1192,151 +972,82 @@ const LiftSim = (function () {
         if (ok) AudioEngine.announce('Pintu tertutup');
       });
     }
-    // alarm — FIXED: enabled always, debounced, idempotent per press
     if (DOM.btnAlarm) {
       DOM.btnAlarm.addEventListener('click', () => {
-        // simple debounce: ignore if pressed in last 2 seconds
         const last = DOM.btnAlarm._lastTs || 0;
-        if (nowMs() - last < 2000) {
-          appendLogUI('Alarm: sudah dipanggil baru-baru ini.');
-          return;
-        }
+        if (nowMs() - last < 2000) { appendLogUI('Alarm: sudah dipanggil baru-baru ini.'); return; }
         DOM.btnAlarm._lastTs = nowMs();
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep({ freq: 240, time: 0.28, vol: 0.28 });
         appendLogUI('Alarm ditekan — bantuan diberitahu (simulasi).');
         dispatch('lift:alarm', { who: 'Passenger' });
-        // schedule simulated tech check
         world.scheduled.push({ ts: nowMs() + secToMs(8), type: 'auto_repair', payload: { comp: 'control' } });
       });
     }
-
-    // modal close guard
     if (DOM.modalClose) DOM.modalClose.addEventListener('click', () => { if (DOM.modal) DOM.modal.setAttribute('aria-hidden', 'true'); });
-
-    // audio toggle button (if present)
     if (DOM.audioToggle) {
       DOM.audioToggle.addEventListener('click', () => {
-        const on = AudioEngine.toggle();
-        DOM.audioToggle.textContent = on ? '🔊' : '🔇';
+        const on = AudioEngine.toggle(); DOM.audioToggle.textContent = on ? '🔊' : '🔇';
         appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
       });
     }
-
-    // keyboard shortcuts: m = mute, o = open, c = close
     window.addEventListener('keydown', (e) => {
-      if (e.key.toLowerCase() === 'm') {
-        const on = AudioEngine.toggle();
-        if (DOM.audioToggle) DOM.audioToggle.textContent = on ? '🔊' : '🔇';
-        appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
-      } else if (e.key.toLowerCase() === 'o') {
-        DOM.btnDoorOpen?.click();
-      } else if (e.key.toLowerCase() === 'c') {
-        DOM.btnDoorClose?.click();
-      }
+      try {
+        if (e.key.toLowerCase() === 'm') {
+          const on = AudioEngine.toggle(); if (DOM.audioToggle) DOM.audioToggle.textContent = on ? '🔊' : '🔇';
+          appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
+        } else if (e.key.toLowerCase() === 'o') DOM.btnDoorOpen?.click();
+        else if (e.key.toLowerCase() === 'c') DOM.btnDoorClose?.click();
+      } catch (err) { /* ignore */ }
     });
 
-    // event listeners to keep UI sync
-    window.addEventListener('lift:arrived', (e) => {
-      if (e?.detail) appendLogUI(`Lift tiba di lantai ${e.detail.floor}`);
-    });
-    window.addEventListener('lift:door', (e) => {
-      if (e?.detail?.state) appendLogUI(`Door ${e.detail.state}`);
-    });
-    window.addEventListener('lift:call', (e) => {
-      if (e?.detail) appendLogUI(`Call: ${e.detail.floor} by ${e.detail.who || 'unknown'}`);
-    });
-    window.addEventListener('lift:boarded', (e) => {
-      appendLogUI('Anda berada di dalam lift.');
-      // reveal internal keypad
-      buildInternalKeypad(world);
-      updatePanelsVisibility(world);
-    });
-    window.addEventListener('lift:exited', (e) => {
-      appendLogUI('Anda berada di luar lift.');
-      // clear selected keypad buttons visually
-      if (typeof e?.detail?.floor === 'number') clearSelectedKeypadButton(e.detail.floor);
-      buildInternalKeypad(world);
-      updatePanelsVisibility(world);
-    });
+    window.addEventListener('lift:arrived', (e) => { if (e?.detail) appendLogUI(`Lift tiba di lantai ${e.detail.floor}`); });
+    window.addEventListener('lift:door', (e) => { if (e?.detail?.state) appendLogUI(`Door ${e.detail.state}`); });
+    window.addEventListener('lift:call', (e) => { if (e?.detail) appendLogUI(`Call: ${e.detail.floor} by ${e.detail.who || 'unknown'}`); });
+    window.addEventListener('lift:boarded', (e) => { appendLogUI('Anda berada di dalam lift.'); buildInternalKeypad(world); updatePanelsVisibility(world); });
+    window.addEventListener('lift:exited', (e) => { appendLogUI('Anda berada di luar lift.'); if (typeof e?.detail?.floor === 'number') clearSelectedKeypadButton(e.detail.floor); buildInternalKeypad(world); updatePanelsVisibility(world); });
   }
 
-  /* -------------------------
-     Persistence
-  ------------------------- */
+  /* Persistence */
   const PERSIST_KEY = CFG.persistenceKey || 'only-lift-world-v1';
   function saveNow(world) {
-    try {
-      saveJSON(PERSIST_KEY, { ts: nowMs(), world: world.serialize() });
-    } catch (e) {
-      console.warn('saveNow failed', e);
-    }
+    try { safeStorage.set(PERSIST_KEY, { ts: nowMs(), world: world.serialize() }); }
+    catch (e) { console.warn('saveNow failed', e); }
   }
-  function tryLoad() {
-    try {
-      return loadJSON(PERSIST_KEY);
-    } catch (e) {
-      return null;
-    }
-  }
+  function tryLoad() { try { return safeStorage.get(PERSIST_KEY); } catch (e) { return null; } }
 
-  /* -------------------------
-     Bootstrap
-  ------------------------- */
+  /* Bootstrap */
   let world;
   const saved = tryLoad();
   if (saved && saved.world) {
     try {
       world = World.deserialize(saved.world);
-      // fast-forward simulation up to 10 minutes to keep plausible
       const delta = Math.floor((nowMs() - (saved.ts || nowMs())) / 1000);
       const ff = Math.min(delta, 60 * 10);
       if (ff > 2) {
-        let ran = 0;
-        const stepSec = 5;
-        while (ran < ff) {
-          world.step(Math.min(stepSec, ff - ran));
-          ran += stepSec;
-        }
+        let ran = 0; const stepSec = 5;
+        while (ran < ff) { world.step(Math.min(stepSec, ff - ran)); ran += stepSec; }
         world.log(`Fast-forwarded ${Math.round(ff)}s since last session`);
       }
-    } catch (e) {
-      console.warn('Failed to deserialize saved world; creating new one.', e);
-      world = new World();
-      world.log('World initialized (fresh).');
-    }
-  } else {
-    world = new World();
-    world.log('World initialized (fresh).');
-  }
+    } catch (e) { console.warn('Failed to deserialize saved world; creating new one.', e); world = new World(); world.log('World initialized (fresh).'); }
+  } else { world = new World(); world.log('World initialized (fresh).'); }
 
-  // attach renderer
   const renderer = new Renderer(DOM.canvas, world);
-
-  // initial UI build
   buildInternalKeypad(world);
   renderExternalPanel(world);
   updatePanelsVisibility(world);
   wireControls(world);
 
-  // listeners: keep external panel reacting to call assignments and elevator events
   window.addEventListener('lift:arrived', () => {
     renderExternalPanel(world);
-    // if elevator arrived and doors open at some floor where player had requested inside, clear selected btn
     const f = world.elev.arrivalFloor;
     if (typeof f === 'number') {
-      // mark served calls
       world.markCallServedAtFloor(f);
-      // clear selected keypad button if that was the destination
       if (world.playerRequestedFloor === f) clearSelectedKeypadButton(f);
     }
   });
-  window.addEventListener('lift:call', () => {
-    renderExternalPanel(world);
-  });
+  window.addEventListener('lift:call', () => { renderExternalPanel(world); });
 
-  /* -------------------------
-     Simulation loop (fixed-step)
-  ------------------------- */
+  /* Simulation loop */
   let lastRAF = performance.now();
   let accumulator = 0;
   const STEP_MS = 1000 / 60;
@@ -1352,41 +1063,32 @@ const LiftSim = (function () {
       steps++;
     }
 
-    // renderer draw
     renderer.draw();
 
-    // UI sync
     if (DOM.displayFloor) DOM.displayFloor.textContent = String(world.elev.metersToFloor(world.elev.position));
     if (DOM.displayState) DOM.displayState.textContent = world.elev.state;
     if (DOM.readoutLoad) DOM.readoutLoad.textContent = `${Math.round(world.elev.loadKg)} kg`;
     if (DOM.readoutSpeed) DOM.readoutSpeed.textContent = `${world.elev.velocity.toFixed(2)} m/s`;
     if (DOM.readoutDoor) DOM.readoutDoor.textContent = world.elev.doorsOpen ? 'Terbuka' : 'Tertutup';
 
-    // re-render panels intelligently
     renderExternalPanel(world);
-    renderActionPanel(world);      // NEW: show Masuk/Keluar when door open
+    renderActionPanel(world);
     updatePanelsVisibility(world);
 
     requestAnimationFrame(frame);
   }
   requestAnimationFrame((t) => { lastRAF = t; requestAnimationFrame(frame); });
 
-  // periodic save
   setInterval(() => saveNow(world), 8000);
-
-  // unlock audio gracefully on first user gesture
   const unlockOnce = () => { AudioEngine.ensure(); AudioEngine.unlock(); window.removeEventListener('click', unlockOnce); };
   window.addEventListener('click', unlockOnce, { once: true });
 
-  // expose debug API and small helpers
   window.LiftSim = {
-    world,
-    cfg: CFG,
-    audio: AudioEngine,
+    world, cfg: CFG, audio: AudioEngine,
     saveNow: () => { saveNow(world); appendLogUI('World saved'); },
     reset: (preserveFloor = true) => {
       const f = preserveFloor ? world.playerFloor : CFG.initialFloor;
-      localStorage.removeItem(PERSIST_KEY);
+      try { safeStorage.remove(PERSIST_KEY); } catch (e) { /* ignore */ }
       world = new World();
       world.playerFloor = f;
       buildInternalKeypad(world);
@@ -1397,7 +1099,7 @@ const LiftSim = (function () {
     }
   };
 
-  appendLogUI('Simulator siap — perbaikan: action panel dari HTML akan dipakai; auto-close = ' + (CFG.doorAutoCloseMs/1000) + 's; tombol Masuk/Keluar harusnya bisa diklik. Tekan "m" untuk mute/unmute.');
+  appendLogUI('Simulator siap — Auto-enter/auto-exit dimatikan; masuk/keluar manual. Auto-close = ' + (CFG.doorAutoCloseMs/1000) + 's; tombol Masuk/Keluar harusnya bisa diklik. Tekan "m" untuk mute/unmute.');
   console.info('LiftSim initialized', { cfg: CFG });
 
   return { world, cfg: CFG, audio: AudioEngine };
