@@ -1,6 +1,6 @@
 // script.js
 // The Only Lift — fixed: NO auto-enter/exit, robust auto-close, safe storage fallback,
-// block movement while doors are open, improved mobile behavior
+// block movement while doors are open, improved mobile/desktop handlers
 // Usage: <script type="module" src="script.js" defer></script>
 
 const LiftSim = (function () {
@@ -13,6 +13,7 @@ const LiftSim = (function () {
   const nowMs = () => Date.now();
   const secToMs = s => s * 1000;
   const rand = (a, b) => a + Math.random() * (b - a);
+
   // storage: graceful fallback if localStorage/sessionStorage are inaccessible
   let __memoryStore = {};
   const storageAvailable = (() => {
@@ -34,7 +35,6 @@ const LiftSim = (function () {
         __memoryStore[k] = JSON.stringify(v);
       }
     } catch (e) {
-      // don't spam console; keep a warning
       console.warn('saveJSON failed', e);
       try { __memoryStore[k] = JSON.stringify(v); } catch (_) {}
     }
@@ -128,14 +128,14 @@ const LiftSim = (function () {
     actionPanel: document.getElementById('actionPanel')
   };
 
-  // ensure actionPanel exists & accessible (keeps it clickable on mobile)
+  // ensure actionPanel exists & accessible (keeps it clickable on mobile & desktop)
   if (DOM.actionPanel) {
     DOM.actionPanel.setAttribute('role', DOM.actionPanel.getAttribute('role') || 'region');
     DOM.actionPanel.setAttribute('aria-label', DOM.actionPanel.getAttribute('aria-label') || 'Tindakan cepat (Masuk/Keluar)');
     DOM.actionPanel.setAttribute('aria-live', DOM.actionPanel.getAttribute('aria-live') || 'polite');
-    // ensure pointer events & z-index in case CSS elsewhere drops it
     DOM.actionPanel.style.pointerEvents = DOM.actionPanel.style.pointerEvents || 'auto';
-    DOM.actionPanel.style.zIndex = DOM.actionPanel.style.zIndex || '9999';
+    // ensure high z-index so it is clickable above possible canvas overlays
+    if (!DOM.actionPanel.style.zIndex) DOM.actionPanel.style.zIndex = '9999';
   } else {
     const ap = document.createElement('div');
     ap.id = 'actionPanel';
@@ -165,6 +165,34 @@ const LiftSim = (function () {
   }
   if (!DOM.externalCallPanel) {
     const el = document.createElement('div'); el.id = 'externalCallPanel'; el.className = 'external-call-panel'; if (ROOT) ROOT.appendChild(el); DOM.externalCallPanel = el;
+  }
+
+  /* -------------------------
+     Button handler helper (pointer + click, dedup)
+     Ensures consistent responsiveness on desktop & mobile and avoids double-calls
+  ------------------------- */
+  function attachButtonHandler(btn, handler, options = {}) {
+    if (!btn || typeof handler !== 'function') return;
+    if (btn._liftHandlerAttached) return;
+    btn._liftHandlerAttached = true;
+    btn._liftHandlerLastTs = 0;
+    const guardMs = options.guardMs ?? 350;
+    const wrapped = (ev) => {
+      // small guard to avoid pointerdown+click duplicate and accidental double-tap
+      const now = nowMs();
+      if (now - btn._liftHandlerLastTs < guardMs) {
+        ev.preventDefault?.();
+        return;
+      }
+      btn._liftHandlerLastTs = now;
+      try {
+        ev.preventDefault?.();
+      } catch (_) {}
+      try { handler(ev); } catch (e) { console.warn('handler error', e); }
+    };
+    // pointerdown triggers earlier on touch/pen/mouse; keep click as fallback
+    btn.addEventListener('pointerdown', wrapped, { passive: false });
+    btn.addEventListener('click', wrapped, { passive: false });
   }
 
   /* -------------------------
@@ -324,6 +352,7 @@ const LiftSim = (function () {
     // open doors and schedule unconditional auto-close after autoCloseMs
     openDoors() {
       if (this.components.door < 5) return false;
+      // set boolean immediately — prevents movement race
       this.doorsOpen = true;
       this.state = EState.DOOR_OPEN;
       this.arrivalTs = nowMs();
@@ -356,6 +385,7 @@ const LiftSim = (function () {
     closeDoors() {
       if (this.components.door < 5) return false;
       if (this._autoCloseTimer) { clearTimeout(this._autoCloseTimer); this._autoCloseTimer = null; }
+      // set boolean synchronously to avoid race
       this.doorsOpen = false;
       this.state = EState.DOOR_CLOSED;
       AudioEngine.doorSwoosh(false);
@@ -364,7 +394,7 @@ const LiftSim = (function () {
     }
 
     enterPlayer(weight) {
-      if (!this.doorsOpen) return false;         // require doors open (no doorProgress gating)
+      if (!this.doorsOpen) return false;         // require doors open
       if (this.playerInside) return false;
       if (nowMs() - this.lastDoorActionMs < this.doorCooldownMs) return false;
       if (this.loadKg + weight > this.overloadLimitKg) return false;
@@ -420,8 +450,7 @@ const LiftSim = (function () {
 
       // IMPORTANT FIX:
       // Block movement whenever doors are flagged as open.
-      // Previously this used a small doorProgress threshold which allowed race conditions
-      // on slow/mobile devices. Now doorsOpen === true always prevents movement.
+      // Using the boolean ensures consistency across devices.
       if (this.doorsOpen) {
         this.velocity = 0;
         this.acceleration = 0;
@@ -789,6 +818,10 @@ const LiftSim = (function () {
 
   /* -------------------------
      UI: external panel, keypad, action panel
+     -> important changes:
+        - use attachButtonHandler everywhere for robust pointer/click
+        - show action panel as soon as doorsOpen === true (no doorProgress gating)
+        - selecting floor while doors open is allowed, but movement is blocked until doors close
   ------------------------- */
   let lastRenderedSnapshot = null;
 
@@ -818,13 +851,14 @@ const LiftSim = (function () {
         badge.textContent = assigned ? 'Panggilan: ditugaskan' : 'Panggilan: menunggu';
         row.appendChild(badge);
       } else {
-        up.addEventListener('click', () => {
+        // use attachButtonHandler for robustness
+        attachButtonHandler(up, () => {
           if (up.disabled) return;
           up.disabled = true; setTimeout(()=>{ up.disabled=false; }, 900);
           AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
           const ok = world.playerCall(f, 'up'); if (!ok) appendLogUI('Panggilan tidak dibuat (duplicate/debounce).');
         });
-        down.addEventListener('click', () => {
+        attachButtonHandler(down, () => {
           if (down.disabled) return;
           down.disabled = true; setTimeout(()=>{ down.disabled=false; }, 900);
           AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
@@ -845,16 +879,20 @@ const LiftSim = (function () {
       else { btn = document.createElement('button'); btn.className='floor-btn'; btn.type='button'; btn.innerHTML=`<span class="floor-num">${f}</span>`; }
       btn.dataset.floor = f;
       const span = btn.querySelector('.floor-num'); if (span) span.textContent = f;
-      btn.addEventListener('click', () => {
+
+      // use attachButtonHandler to ensure consistent pointer/click handling
+      attachButtonHandler(btn, () => {
         if (btn.disabled) return;
         if (btn.classList.contains('floor-selected')) { appendLogUI(`Lantai ${f} sudah dipilih.`); return; }
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep({freq:880,time:0.06});
         if (!world.elev.playerInside) { appendLogUI('Keypad hanya aktif saat berada di dalam kabin.'); return; }
+        // Record request — elevator will not move while doorsOpen is true (movement blocked)
         world.elev.requestFloor(f);
         btn.classList.add('floor-selected'); btn.setAttribute('aria-pressed','true');
         world.playerRequestedFloor = f;
-        appendLogUI(`Meminta lantai ${f}`);
+        appendLogUI(`Meminta lantai ${f} (akan bergerak setelah pintu tertutup).`);
       });
+
       container.appendChild(btn);
     }
     container.style.display = world.elev.playerInside ? 'grid' : 'none';
@@ -868,17 +906,20 @@ const LiftSim = (function () {
   function renderActionPanel(world) {
     const ap = DOM.actionPanel; if (!ap) return;
     ap.innerHTML = '';
+
     const e = world.elev;
-    if (!(e.doorsOpen && e.doorProgress > 0.98)) { ap.style.display='none'; return; }
+    // IMPORTANT CHANGE: show action panel immediately when doorsOpen is true
+    if (!e.doorsOpen) { ap.style.display='none'; return; }
     ap.style.display='flex'; ap.style.pointerEvents='auto'; ap.style.zIndex='9999';
+
     const liftFloor = e.metersToFloor(e.position);
 
     // Masuk (manual)
     if (!e.playerInside && liftFloor === world.playerFloor) {
       const btn = document.createElement('button'); btn.className='action-btn enter'; btn.type='button'; btn.textContent='Masuk';
       btn.setAttribute('aria-label', `Masuk lift di lantai ${liftFloor}`); btn.tabIndex=0;
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
+      attachButtonHandler(btn, (ev) => {
+        ev.stopPropagation?.();
         if (btn.disabled) return;
         btn.disabled = true; setTimeout(()=>{ btn.disabled=false; }, 1200);
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
@@ -899,8 +940,8 @@ const LiftSim = (function () {
     if (e.playerInside) {
       const btn = document.createElement('button'); btn.className='action-btn exit'; btn.type='button'; btn.textContent='Keluar';
       btn.setAttribute('aria-label', `Keluar lift di lantai ${liftFloor}`); btn.tabIndex=0;
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
+      attachButtonHandler(btn, (ev) => {
+        ev.stopPropagation?.();
         if (btn.disabled) return;
         btn.disabled = true; setTimeout(()=>{ btn.disabled=false; }, 1200);
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
@@ -937,7 +978,7 @@ const LiftSim = (function () {
 
   function wireControls(world) {
     if (DOM.btnDoorOpen) {
-      DOM.btnDoorOpen.addEventListener('click', () => {
+      attachButtonHandler(DOM.btnDoorOpen, () => {
         if (DOM.btnDoorOpen.disabled) return;
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
         const ok = world.elev.openDoors();
@@ -946,7 +987,7 @@ const LiftSim = (function () {
       });
     }
     if (DOM.btnDoorClose) {
-      DOM.btnDoorClose.addEventListener('click', () => {
+      attachButtonHandler(DOM.btnDoorClose, () => {
         if (DOM.btnDoorClose.disabled) return;
         AudioEngine.ensure(); AudioEngine.unlock(); AudioEngine.beep();
         const ok = world.elev.closeDoors();
@@ -955,7 +996,7 @@ const LiftSim = (function () {
       });
     }
     if (DOM.btnAlarm) {
-      DOM.btnAlarm.addEventListener('click', () => {
+      attachButtonHandler(DOM.btnAlarm, () => {
         const last = DOM.btnAlarm._lastTs || 0;
         if (nowMs() - last < 2000) { appendLogUI('Alarm: sudah dipanggil baru-baru ini.'); return; }
         DOM.btnAlarm._lastTs = nowMs();
@@ -965,9 +1006,9 @@ const LiftSim = (function () {
         world.scheduled.push({ ts: nowMs() + secToMs(8), type: 'auto_repair', payload: { comp: 'control' } });
       });
     }
-    if (DOM.modalClose) DOM.modalClose.addEventListener('click', () => { if (DOM.modal) DOM.modal.setAttribute('aria-hidden', 'true'); });
+    if (DOM.modalClose) attachButtonHandler(DOM.modalClose, () => { if (DOM.modal) DOM.modal.setAttribute('aria-hidden', 'true'); });
     if (DOM.audioToggle) {
-      DOM.audioToggle.addEventListener('click', () => {
+      attachButtonHandler(DOM.audioToggle, () => {
         const on = AudioEngine.toggle(); DOM.audioToggle.textContent = on ? '🔊' : '🔇';
         appendLogUI(on ? 'Suara aktif' : 'Suara dimatikan');
       });
